@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import math
+import time
+
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
@@ -43,8 +47,11 @@ class StatusSupervisor(Node):
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', False)
         self.declare_parameter('publish_rate_hz', 2.0)
+        self.declare_parameter('input_freshness_timeout_sec', 2.5)
         self._safety: SafetyState | None = None
         self._world: WorldSummary | None = None
+        self._safety_received_steady: float | None = None
+        self._world_received_steady: float | None = None
         self._status_publisher = self.create_publisher(
             RobotStatus, STATUS_TOPIC, state_qos()
         )
@@ -66,24 +73,50 @@ class StatusSupervisor(Node):
         rate = float(self.get_parameter('publish_rate_hz').value)
         if rate <= 0.0:
             raise ValueError('publish_rate_hz must be positive')
-        self.create_timer(1.0 / rate, self._publish)
+        freshness_timeout = float(
+            self.get_parameter('input_freshness_timeout_sec').value
+        )
+        if not math.isfinite(freshness_timeout) or freshness_timeout <= 0.0:
+            raise ValueError(
+                'input_freshness_timeout_sec must be finite and positive'
+            )
+        # Readiness liveness must continue to expire while simulation time is
+        # paused, so both receipt age and the supervisor timer use steady time.
+        self._steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.create_timer(
+            1.0 / rate, self._publish, clock=self._steady_clock
+        )
         self._publish()
 
     def _on_safety(self, message: SafetyState) -> None:
         self._safety = message
+        self._safety_received_steady = time.monotonic()
 
     def _on_world(self, message: WorldSummary) -> None:
         self._world = message
+        self._world_received_steady = time.monotonic()
 
     def _publish(self) -> None:
-        decision = decide_status(self._safety, self._world)
+        now_steady = time.monotonic()
+        timeout = float(
+            self.get_parameter('input_freshness_timeout_sec').value
+        )
+        safety_fresh = self._is_fresh(
+            self._safety, self._safety_received_steady, now_steady, timeout
+        )
+        world_fresh = self._is_fresh(
+            self._world, self._world_received_steady, now_steady, timeout
+        )
+        safety = self._safety if safety_fresh else None
+        world = self._world if world_fresh else None
+        decision = decide_status(safety, world)
         status = RobotStatus()
         status.header.stamp = self.get_clock().now().to_msg()
         status.header.frame_id = 'base_link'
         status.mode = decision.mode
         status.localization_state = decision.localization_state
-        if self._safety is not None:
-            status.safety = self._safety
+        if safety is not None:
+            status.safety = safety
         status.battery_percent = 0.0
         status.battery_state_known = False
         status.motion_ready = decision.motion_ready
@@ -97,24 +130,35 @@ class StatusSupervisor(Node):
         diagnostic = DiagnosticStatus()
         diagnostic.name = 'buddy/status_supervisor'
         diagnostic.hardware_id = 'software'
-        diagnostic.level = (
-            DiagnosticStatus.OK
-            if self._safety is not None and self._world is not None
-            else DiagnosticStatus.WARN
+        any_stale = (
+            (self._safety is not None and not safety_fresh)
+            or (self._world is not None and not world_fresh)
         )
-        diagnostic.message = (
-            'status inputs ready'
-            if diagnostic.level == DiagnosticStatus.OK
-            else 'waiting for status inputs'
-        )
+        if safety_fresh and world_fresh:
+            diagnostic.level = DiagnosticStatus.OK
+            diagnostic.message = 'status inputs ready'
+        elif any_stale:
+            diagnostic.level = DiagnosticStatus.ERROR
+            diagnostic.message = 'status input heartbeat is stale'
+        else:
+            diagnostic.level = DiagnosticStatus.WARN
+            diagnostic.message = 'waiting for status inputs'
         diagnostic.values = [
             KeyValue(
                 key='safety_received',
                 value=str(self._safety is not None).lower(),
             ),
             KeyValue(
+                key='safety_fresh',
+                value=str(safety_fresh).lower(),
+            ),
+            KeyValue(
                 key='world_received',
                 value=str(self._world is not None).lower(),
+            ),
+            KeyValue(
+                key='world_fresh',
+                value=str(world_fresh).lower(),
             ),
             KeyValue(
                 key='motion_ready',
@@ -123,6 +167,14 @@ class StatusSupervisor(Node):
         ]
         diagnostics.status = [diagnostic]
         self._diagnostics.publish(diagnostics)
+
+    @staticmethod
+    def _is_fresh(message, received_steady, now_steady, timeout) -> bool:
+        """Return true only for a received dependency inside its steady lease."""
+        if message is None or received_steady is None:
+            return False
+        age = now_steady - received_steady
+        return 0.0 <= age <= timeout
 
 
 def main(args: list[str] | None = None) -> None:

@@ -60,9 +60,33 @@ The only controller path is:
 The arbiter owns fixed source priorities. Both the arbiter and safety filter
 stop stale commands. The safety filter independently enforces velocity and
 acceleration limits, scan health, obstacle slowdown/stop, controller health
-when enabled, and a latched emergency stop. Emergency reset requires an
+in production, and a latched emergency stop. Production motion requires a
+fresh, exact-name `buddy_base_controller` diagnostic heartbeat; a missing,
+error-level, or steady-time-stale heartbeat enters controller fault and
+publishes zero. Emergency reset requires an
 allowed source, operator acknowledgement, released physical input, and healthy
-required inputs.
+required inputs. Obstacle handling is directional for forward and reverse
+translation and requires all-around clearance for rotation. A second watchdog
+inside the Gazebo process forces the controller input to zero if the ROS
+adapter disappears. The adapter reports its own command-publication health, so
+loss of that bridge is visible both to safety policy and diagnostics.
+
+The navigation velocity boundary opens only while the registered named
+navigation action owner emits its status heartbeat. Its 50 ms heartbeat and
+200 ms steady-time lease close authorization independently of Nav2 command
+freshness if the adapter process disappears. A persistent private Nav2 command
+therefore cannot keep the robot moving after owner loss.
+
+Task execution retains ownership of lower actions until a terminal result is
+observed. An unconfirmed cancellation is quarantined and escalated through the
+latched emergency-stop contract. Status, world, capability, and action-neighbor
+readiness use steady-time liveness where authorization is safety-relevant;
+paused simulation time cannot preserve stale authorization.
+
+Voice capture and speech-recognition provider exceptions are converted to
+structured error diagnostics and the input process remains recoverable.
+Navigation ownership publishes startup, live, normal-close, and lease-timeout
+diagnostics, including the private velocity-gate state.
 
 ## Deliberate limitations
 
@@ -87,6 +111,12 @@ required inputs.
   the same upper ROS interfaces.
 - The RGB camera is present, but object recognition, person following, docking,
   and manipulation are outside this slice.
+- Workspace tests must currently run with `colcon test --executor sequential`
+  because concurrent discovery-based package tests reuse the frozen global ROS
+  action names.
+- ROS 2 Jazzy action-process teardown uses version-scoped private rclpy task
+  registries and worker-pool state. Replace that workaround when a future rclpy
+  release provides a complete public drain API.
 
 ## Recommended next vertical slice
 

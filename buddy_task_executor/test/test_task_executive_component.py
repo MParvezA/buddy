@@ -4,20 +4,25 @@ import os
 from test.mock_action_servers import MockCapabilityActionServers
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+from action_msgs.msg import GoalStatus
 from buddy_capabilities.catalog import TYPE_STRING
 from buddy_interfaces.action import ExecuteTask, NavigateToNamedLocation
 from buddy_interfaces.msg import (
-    NamedLocation, RobotStatus, SafetyState, TaskArgument, TaskPlan, TaskStep,
+    NamedLocation, RobotStatus, SafetyState, TaskArgument, TaskPlan, TaskStep, TaskStepResult,
     WorldSummary)
 from buddy_task_executor.executive import TaskExecutive
+from diagnostic_msgs.msg import DiagnosticStatus
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.task import Future
 
 
 def wait(future, timeout=3.0):
@@ -34,6 +39,29 @@ def identifier(value):
     result = UUID()
     result.uuid = [value] * 16
     return result
+
+
+class FakeLowerGoal:
+    """Accepted lower goal with deterministic transport-future failures."""
+
+    accepted = True
+
+    def __init__(self, *, result_error=None, cancel_error=None):
+        self._result = Future()
+        if result_error is not None:
+            self._result.set_exception(result_error)
+        self._cancel_error = cancel_error
+
+    def get_result_async(self):
+        return self._result
+
+    def cancel_goal_async(self):
+        cancellation = Future()
+        if self._cancel_error is not None:
+            cancellation.set_exception(self._cancel_error)
+        else:
+            cancellation.set_result(SimpleNamespace(goals_canceling=[object()]))
+        return cancellation
 
 
 class TaskExecutiveComponentTest(unittest.TestCase):
@@ -102,11 +130,14 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         return plan
 
     def _result(self, plan):
+        return self._wrapped_result(plan).result
+
+    def _wrapped_result(self, plan):
         goal = ExecuteTask.Goal()
         goal.plan = plan
         goal_handle = wait(self.client.send_goal_async(goal))
         self.assertTrue(goal_handle.accepted)
-        return wait(goal_handle.get_result_async()).result
+        return wait(goal_handle.get_result_async())
 
     def _send(self, plan, feedback_callback=None):
         goal = ExecuteTask.Goal()
@@ -114,10 +145,94 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         return wait(self.client.send_goal_async(goal, feedback_callback=feedback_callback))
 
     def test_executes_speak_through_deterministic_mock_action(self):
-        result = self._result(self._plan('speak'))
+        wrapped = self._wrapped_result(self._plan('speak'))
+        result = wrapped.result
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_SUCCEEDED)
         self.assertEqual(result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
         self.assertEqual(result.step_results[0].outcome, 0)
         self.assertEqual(self.mocks.speak_requests[-1].text, 'hello')
+
+    def test_lower_aborts_with_default_success_payload_are_task_failures(self):
+        cases = (
+            ('speak', 'text', 'hello', 'speak_terminal_status'),
+            ('navigate_to', 'location', 'kitchen', 'navigation_terminal_status'),
+        )
+        for capability, argument_name, argument_value, mode_attribute in cases:
+            setattr(self.mocks, mode_attribute, 'aborted')
+            try:
+                wrapped = self._wrapped_result(
+                    self._plan(capability, argument_name, argument_value))
+            finally:
+                setattr(self.mocks, mode_attribute, 'succeeded')
+            self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+            self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+            self.assertEqual(
+                wrapped.result.step_results[0].outcome,
+                TaskStepResult.OUTCOME_FAILED)
+            self.assertTrue(wrapped.result.message)
+
+    def test_submission_future_exception_is_structured_and_releases_reservation(self):
+        failed_submission = Future()
+        failed_submission.set_exception(RuntimeError('submission transport failed'))
+        with (
+                patch.object(self.executive._diagnostics, 'publish') as publish,
+                patch.object(
+                    self.executive._speak_client, 'send_goal_async',
+                    return_value=failed_submission)):
+            wrapped = self._wrapped_result(self._plan('speak'))
+
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertTrue(wrapped.result.step_results)
+        self.assertIn('submission transport failed', wrapped.result.message)
+        self.assertTrue(any(
+            call.args[0].status[0].level == DiagnosticStatus.ERROR
+            and 'submission transport failed' in call.args[0].status[0].message
+            for call in publish.call_args_list))
+
+        recovery = self._wrapped_result(self._plan('speak'))
+        self.assertEqual(recovery.status, GoalStatus.STATUS_SUCCEEDED)
+        self.assertEqual(recovery.result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
+
+    def test_result_future_exception_is_structured_and_releases_reservation(self):
+        lower_goal = FakeLowerGoal(
+            result_error=RuntimeError('result transport failed'))
+        submission = Future()
+        submission.set_result(lower_goal)
+        with patch.object(
+                self.executive._speak_client, 'send_goal_async',
+                return_value=submission):
+            wrapped = self._wrapped_result(self._plan('speak'))
+
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertTrue(wrapped.result.step_results)
+        self.assertIn('result transport failed', wrapped.result.message)
+
+        recovery = self._wrapped_result(self._plan('speak'))
+        self.assertEqual(recovery.status, GoalStatus.STATUS_SUCCEEDED)
+        self.assertEqual(recovery.result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
+
+    def test_cancel_future_exception_is_structured_and_releases_reservation(self):
+        lower_goal = FakeLowerGoal(
+            cancel_error=RuntimeError('cancel transport failed'))
+        submission = Future()
+        submission.set_result(lower_goal)
+        with patch.object(
+                self.executive._speak_client, 'send_goal_async',
+                return_value=submission):
+            goal_handle = self._send(self._plan('speak'))
+            time.sleep(0.05)
+            wait(goal_handle.cancel_goal_async())
+            wrapped = wait(goal_handle.get_result_async())
+
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertIn('cancel transport failed', wrapped.result.message)
+
+        recovery = self._wrapped_result(self._plan('speak'))
+        self.assertEqual(recovery.status, GoalStatus.STATUS_SUCCEEDED)
+        self.assertEqual(recovery.result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
 
     def test_unknown_capability_returns_structured_rejection_without_side_effect(self):
         before = len(self.mocks.speak_requests)
@@ -129,9 +244,11 @@ class TaskExecutiveComponentTest(unittest.TestCase):
     def test_speak_timeout_cancels_mock_action_and_returns_timed_out_step(self):
         self.mocks.hold_speak = True
         try:
-            result = self._result(self._plan('speak', timeout=1))
+            wrapped = self._wrapped_result(self._plan('speak', timeout=1))
         finally:
             self.mocks.hold_speak = False
+        result = wrapped.result
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
         self.assertEqual(result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
         self.assertEqual(result.step_results[0].outcome, 3)
 
@@ -143,11 +260,29 @@ class TaskExecutiveComponentTest(unittest.TestCase):
                 self._plan('speak'), lambda message: feedback.append(message.feedback.state))
             time.sleep(0.1)
             wait(goal_handle.cancel_goal_async())
-            result = wait(goal_handle.get_result_async()).result
+            wrapped = wait(goal_handle.get_result_async())
         finally:
             self.mocks.hold_speak = False
+        result = wrapped.result
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_CANCELED)
         self.assertEqual(result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
         self.assertIn(ExecuteTask.Feedback.STATE_EXECUTING, feedback)
+
+    def test_cancel_acknowledged_but_wrong_terminal_status_fails_safe(self):
+        for terminal_status in ('aborted', 'succeeded'):
+            self.mocks.hold_speak = True
+            self.mocks.cancel_terminal_status = terminal_status
+            try:
+                goal_handle = self._send(self._plan('speak'))
+                time.sleep(0.1)
+                wait(goal_handle.cancel_goal_async())
+                wrapped = wait(goal_handle.get_result_async())
+            finally:
+                self.mocks.hold_speak = False
+                self.mocks.cancel_terminal_status = 'canceled'
+            self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+            self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+            self.assertIn('cancellation', wrapped.result.message)
 
     def test_registered_stop_cancels_an_active_task(self):
         self.mocks.hold_speak = True

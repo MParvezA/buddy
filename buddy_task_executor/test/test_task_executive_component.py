@@ -345,15 +345,23 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         try:
             active = self._send(self._plan('speak'))
             time.sleep(0.1)
+            started = time.monotonic()
             self.executive.request_shutdown()
             deadline = time.monotonic() + self.executive.shutdown_timeout_seconds()
             while not self.executive.shutdown_complete() and time.monotonic() < deadline:
                 time.sleep(0.01)
-            active_result = wait(active.get_result_async()).result
+            wrapped = wait(active.get_result_async())
         finally:
             self.mocks.hold_speak = False
         self.assertTrue(self.executive.shutdown_complete())
-        self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
+        # The task execution callback drains before the five-second ros2 launch
+        # grace period, leaving a separate bounded window for executor teardown.
+        self.assertLess(time.monotonic() - started, 4.0)
+        # Process shutdown requests a safe lower-action cancellation but is not
+        # itself a client cancellation of ExecuteTask, so the enclosing action
+        # remains an aborted transport result with a structured cancelled payload.
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
 
     def test_terminal_navigation_failures_are_structured_without_retry(self):
         terminal_outcomes = (

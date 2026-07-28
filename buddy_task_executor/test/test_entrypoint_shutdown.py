@@ -3,6 +3,7 @@
 import inspect
 import os
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -50,7 +51,7 @@ class EntrypointShutdownTest(unittest.TestCase):
     def test_executor_drain_cancels_queued_future(self):
         executor = object.__new__(executive.DrainingMultiThreadedExecutor)
         future = Mock()
-        future.cancelled.return_value = False
+        future.cancelled.side_effect = [False, True]
         future.done.return_value = False
         future.executing.return_value = False
         future.cancel.return_value = True
@@ -68,6 +69,47 @@ class EntrypointShutdownTest(unittest.TestCase):
         self.assertIn('/buddy/tasks/execute', cancelled[0])
         future.cancel.assert_called_once_with()
         self.assertEqual(executor._futures, [])
+
+    def test_executor_drain_keeps_racing_future_until_its_outcome_is_retrieved(self):
+        executor = object.__new__(executive.DrainingMultiThreadedExecutor)
+        future = Mock()
+        future.cancelled.side_effect = [False, False, False]
+        future.done.side_effect = [False, True]
+        future.executing.return_value = False
+        future.cancel.return_value = False
+        future.exception.return_value = None
+        future.result.return_value = 'completed after cancellation race'
+        source = SimpleNamespace(topic='/buddy/tasks/execute')
+        executor._futures = [future]
+        executor._sigint_gc = None
+        executor._tasks_lock = threading.Lock()
+        executor._pending_tasks = {
+            future: SimpleNamespace(source_entity=source),
+        }
+
+        executor.drain_submitted_callbacks(0.1)
+
+        future.cancel.assert_called_once_with()
+        future.exception.assert_called_once_with()
+        future.result.assert_called_once_with()
+        self.assertEqual(executor._futures, [])
+
+    def test_executor_shutdown_releases_idle_workers_within_bound(self):
+        os.environ.setdefault('ROS_LOG_DIR', '/tmp')
+        os.environ.setdefault('FASTDDS_BUILTIN_TRANSPORTS', 'SHM')
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+        executor = executive.DrainingMultiThreadedExecutor(num_threads=1)
+        ran = threading.Event()
+        try:
+            completed = executor._executor.submit(ran.set)
+            self.assertTrue(ran.wait(0.5))
+            completed.result(timeout=0.5)
+            started = time.monotonic()
+            self.assertTrue(executor.shutdown(timeout_sec=0.4))
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            if rclpy.ok():
+                rclpy.shutdown()
 
     def test_executor_drain_times_out_for_executing_future(self):
         executor = object.__new__(executive.DrainingMultiThreadedExecutor)
@@ -93,7 +135,7 @@ class EntrypointShutdownTest(unittest.TestCase):
     def test_main_only_handles_shutdown_signals_and_checks_context(self):
         source = inspect.getsource(executive.main)
         self.assertIn('except (KeyboardInterrupt, ExternalShutdownException):', source)
-        self.assertIn('executor.shutdown()', source)
+        self.assertIn('executor.shutdown(timeout_sec=0.25)', source)
         self.assertIn('node.destroy_node()', source)
         self.assertIn('if rclpy.ok():', source)
 
@@ -109,7 +151,8 @@ class EntrypointShutdownTest(unittest.TestCase):
         executor.spin_once.side_effect = lambda timeout_sec: events.append('spin_once')
         executor.drain_submitted_callbacks.side_effect = (
             lambda timeout_sec: events.append('drain_callbacks') or ())
-        executor.shutdown.side_effect = lambda: events.append('executor_shutdown')
+        executor.shutdown.side_effect = (
+            lambda **_kwargs: events.append('executor_shutdown'))
         with (
                 patch.object(executive.rclpy, 'init') as initialize,
                 patch.object(executive.rclpy, 'ok', return_value=True),

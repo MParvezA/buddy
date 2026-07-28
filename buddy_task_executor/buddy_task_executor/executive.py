@@ -57,9 +57,13 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
                         task_data = self._pending_tasks.get(future)
                     source = None if task_data is None else task_data.source_entity
                     cancelled_sources.append(self._entity_description(source))
+                    # A task can transition to executing between the check above
+                    # and cancel().  Keep it tracked in that case so a terminal
+                    # outcome is still retrieved rather than silently discarded.
                     future.cancel()
-                    self._futures.remove(future)
-                    made_progress = True
+                    if future.cancelled():
+                        self._futures.remove(future)
+                        made_progress = True
                     continue
                 self._futures.remove(future)
                 error = future.exception()
@@ -86,6 +90,27 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
             if not made_progress:
                 time.sleep(0.01)
         return tuple(cancelled_sources)
+
+    def shutdown(self, timeout_sec: float = 0.25) -> bool:
+        """Close Jazzy's worker pool within a finite teardown bound.
+
+        ``MultiThreadedExecutor`` inherits ``Executor.shutdown`` in Jazzy.  That
+        method stops the ROS wait set but does not shut down its private
+        ``ThreadPoolExecutor``.  The remaining non-daemon workers keep an idle
+        ``ros2 launch`` process alive after SIGINT.  Callers drain action work
+        before this method, so only idle workers should remain here; the bounded
+        join is a final check rather than an unbounded second drain.
+        """
+        super().shutdown(timeout_sec=0.0)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        workers = tuple(getattr(self._executor, '_threads', ()))
+        for worker in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            worker.join(remaining)
+        return all(not worker.is_alive() for worker in workers)
 
 
 class TaskExecutive(Node):
@@ -114,6 +139,7 @@ class TaskExecutive(Node):
         self._lower_cancellation_in_progress = False
         self._lower_cancellation_complete = threading.Event()
         self._lower_cancellation_result = None
+        self._shutdown_deadline = None
         state_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
         diagnostics_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
@@ -237,6 +263,7 @@ class TaskExecutive(Node):
                     self._lower_cancellation_in_progress = False
                     self._lower_cancellation_complete.clear()
                     self._lower_cancellation_result = None
+                    self._shutdown_deadline = None
                     owns_active_task = True
             if not owns_active_task:
                 stopped, message = self._request_soft_stop()
@@ -556,7 +583,7 @@ class TaskExecutive(Node):
                 self._lower_cancellation_in_progress = True
                 self._lower_cancellation_complete.clear()
         if wait_for_existing:
-            timeout = self.get_parameter('cancellation_wait_seconds').value
+            timeout = self._bounded_cancellation_wait_seconds()
             if not self._lower_cancellation_complete.wait(timeout):
                 return False, 'lower action cancellation did not complete before bound'
             with self._lock:
@@ -578,7 +605,7 @@ class TaskExecutive(Node):
             goal = self._active_lower_goal
             submission = self._pending_lower_submission
         if submission is not None:
-            deadline = time.monotonic() + self.get_parameter('cancellation_wait_seconds').value
+            deadline = self._cancellation_deadline()
             while not submission.done() and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not submission.done():
@@ -596,7 +623,7 @@ class TaskExecutive(Node):
         return True, 'no lower action was active'
 
     def _cancel_lower_action(self, goal, result_future) -> tuple[bool, str]:
-        deadline = time.monotonic() + self.get_parameter('cancellation_wait_seconds').value
+        deadline = self._cancellation_deadline()
         cancellation = goal.cancel_goal_async()
         while not cancellation.done() and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -655,6 +682,19 @@ class TaskExecutive(Node):
         with self._lock:
             return self._cancellation_failure
 
+    def _cancellation_deadline(self) -> float:
+        """Return the normal cancellation bound clipped by shutdown grace."""
+        deadline = time.monotonic() + self.get_parameter(
+            'cancellation_wait_seconds').value
+        with self._lock:
+            shutdown_deadline = self._shutdown_deadline
+        if shutdown_deadline is not None:
+            deadline = min(deadline, shutdown_deadline)
+        return deadline
+
+    def _bounded_cancellation_wait_seconds(self) -> float:
+        return max(0.0, self._cancellation_deadline() - time.monotonic())
+
     def _should_cancel(self, goal_handle) -> bool:
         with self._lock:
             event = self._active_cancel_event
@@ -662,9 +702,12 @@ class TaskExecutive(Node):
 
     def request_shutdown(self) -> None:
         """Request normal task cancellation before ROS entities are destroyed."""
+        deadline = time.monotonic() + self.shutdown_timeout_seconds()
         with self._lock:
             event = self._active_cancel_event
             active = self._active_goal is not None
+            if active and self._shutdown_deadline is None:
+                self._shutdown_deadline = deadline
         if event is not None:
             event.set()
         if not active:
@@ -675,9 +718,14 @@ class TaskExecutive(Node):
         return self._execution_idle.is_set()
 
     def shutdown_timeout_seconds(self) -> float:
-        """Bound shutdown across submission and lower-action cancellation waits."""
+        """Bound active-task draining while preserving time for executor teardown."""
         cancellation_bound = self.get_parameter('cancellation_wait_seconds').value
-        return max(0.1, (2.0 * cancellation_bound) + 0.5)
+        # ros2 launch gives this process a five-second SIGINT grace period.  A
+        # running task can use two lower-action waits (submission then terminal
+        # cancellation), but its total shutdown work is clipped to 3.5 seconds.
+        # The remaining budget is reserved for callback retrieval, thread-pool
+        # closure, entity destruction, and rclpy shutdown.
+        return min(3.5, max(0.1, (2.0 * cancellation_bound) + 0.25))
 
     def destroy_node(self) -> None:
         """Destroy action waitables before standard Node-owned entities."""
@@ -781,16 +829,24 @@ def main(args=None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         _drain_active_task(node, executor)
     finally:
-        cancelled_sources = executor.drain_submitted_callbacks(
-            min(0.5, node.shutdown_timeout_seconds())
-        )
+        try:
+            cancelled_sources = executor.drain_submitted_callbacks(0.25)
+        except (KeyboardInterrupt, ExternalShutdownException):
+            cancelled_sources = ()
+        except Exception as error:
+            # Do not skip the bounded executor/node cleanup if a third-party
+            # callback misbehaves.  A completed callback exception has already
+            # been retrieved by drain_submitted_callbacks.
+            cancelled_sources = ()
+            node.get_logger().error('callback drain failed during shutdown: ' + str(error))
         if cancelled_sources:
             node.get_logger().info(
                 'cancelled queued callbacks before shutdown: '
                 + ', '.join(cancelled_sources)
             )
         try:
-            executor.shutdown()
+            if not executor.shutdown(timeout_sec=0.25):
+                node.get_logger().error('executor workers did not stop before shutdown bound')
         except (KeyboardInterrupt, ExternalShutdownException):
             pass
         try:

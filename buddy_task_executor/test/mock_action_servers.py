@@ -16,6 +16,7 @@ class MockCapabilityActionServers(Node):
         self.navigation_requests = []
         self.hold_speak = False
         self.hold_navigation = False
+        self.navigation_outcome = NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED
         self._speak_server = ActionServer(
             self, Speak, '/buddy/voice/speak', self._speak,
             goal_callback=self._accept, cancel_callback=self._cancel)
@@ -57,7 +58,7 @@ class MockCapabilityActionServers(Node):
             result.message = 'mock navigation cancelled'
             goal_handle.canceled()
             return result
-        result.outcome = NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED
+        result.outcome = self.navigation_outcome
         result.message = 'mock navigation complete'
         goal_handle.succeed()
         return result

@@ -34,7 +34,7 @@ class TaskExecutive(Node):
         self._callback_group = ReentrantCallbackGroup()
         self._status = None
         self._world = None
-        self._active_navigation_goal = None
+        self._active_lower_goal = None
         self._active_goal = None
         self._active_cancel_event = None
         state_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -168,7 +168,7 @@ class TaskExecutive(Node):
         try:
             for index, step in enumerate(plan.steps):
                 if self._should_cancel(goal_handle):
-                    self._cancel_navigation_and_wait()
+                    self._cancel_lower_and_wait()
                     result.outcome = ExecuteTask.Result.OUTCOME_CANCELLED
                     result.message = 'task cancellation requested'
                     if goal_handle.is_cancel_requested:
@@ -215,7 +215,7 @@ class TaskExecutive(Node):
             with self._lock:
                 if owns_active_task:
                     self._active_goal = None
-                    self._active_navigation_goal = None
+                    self._active_lower_goal = None
                     self._active_cancel_event = None
         result.step_results = step_results
         return result
@@ -253,7 +253,11 @@ class TaskExecutive(Node):
         if not goal.accepted:
             return self._step_result(step, TaskStepResult.OUTCOME_REJECTED,
                                      ERROR_CAPABILITY_UNAVAILABLE, 'speech goal rejected')
+        with self._lock:
+            self._active_lower_goal = goal
         action_result = self._wait(goal.get_result_async(), deadline, goal_handle, goal)
+        with self._lock:
+            self._active_lower_goal = None
         if action_result is None:
             if self._should_cancel(goal_handle):
                 return self._step_result(step, TaskStepResult.OUTCOME_CANCELLED, 0,
@@ -289,10 +293,10 @@ class TaskExecutive(Node):
                 return self._step_result(step, TaskStepResult.OUTCOME_REJECTED,
                                          ERROR_CAPABILITY_UNAVAILABLE, 'navigation goal rejected')
             with self._lock:
-                self._active_navigation_goal = goal
+                self._active_lower_goal = goal
             action_result = self._wait(goal.get_result_async(), deadline, goal_handle, goal)
             with self._lock:
-                self._active_navigation_goal = None
+                self._active_lower_goal = None
             if action_result is None:
                 if self._should_cancel(goal_handle):
                     return self._step_result(step, TaskStepResult.OUTCOME_CANCELLED, 0,
@@ -306,12 +310,12 @@ class TaskExecutive(Node):
             if nav_result.outcome == NavigateToNamedLocation.Result.OUTCOME_CANCELLED:
                 return self._step_result(
                     step, TaskStepResult.OUTCOME_CANCELLED, 0, nav_result.message)
+            last = nav_result.message or 'navigation failed'
             if nav_result.outcome in (
                     NavigateToNamedLocation.Result.OUTCOME_SAFETY_STOP,
                     NavigateToNamedLocation.Result.OUTCOME_UNKNOWN_LOCATION,
                     NavigateToNamedLocation.Result.OUTCOME_LOCALIZATION_UNAVAILABLE):
                 break
-            last = nav_result.message or 'navigation failed'
             if time.monotonic() >= deadline:
                 break
         return self._step_result(step, TaskStepResult.OUTCOME_FAILED, ERROR_PRECONDITION, last)
@@ -329,22 +333,16 @@ class TaskExecutive(Node):
             return None
         return future.result()
 
-    def _cancel_active_navigation(self) -> None:
-        with self._lock:
-            goal = self._active_navigation_goal
-        if goal is not None:
-            goal.cancel_goal_async()
-
     def _request_soft_stop(self) -> None:
         with self._lock:
             event = self._active_cancel_event
         if event is not None:
             event.set()
-        self._cancel_navigation_and_wait()
+        self._cancel_lower_and_wait()
 
-    def _cancel_navigation_and_wait(self) -> None:
+    def _cancel_lower_and_wait(self) -> None:
         with self._lock:
-            goal = self._active_navigation_goal
+            goal = self._active_lower_goal
         if goal is not None:
             self._cancel_lower_action(goal, goal.get_result_async())
 

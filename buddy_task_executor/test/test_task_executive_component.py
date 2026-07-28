@@ -205,6 +205,21 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
         self.assertEqual(self.mocks.navigation_requests[-1].location_name, 'kitchen')
 
+    def test_shutdown_request_cancels_and_drains_active_action_before_bound(self):
+        self.mocks.hold_speak = True
+        try:
+            active = self._send(self._plan('speak'))
+            time.sleep(0.1)
+            self.executive.request_shutdown()
+            deadline = time.monotonic() + self.executive.shutdown_timeout_seconds()
+            while not self.executive.shutdown_complete() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            active_result = wait(active.get_result_async()).result
+        finally:
+            self.mocks.hold_speak = False
+        self.assertTrue(self.executive.shutdown_complete())
+        self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
+
     def test_terminal_navigation_failures_are_structured_without_retry(self):
         terminal_outcomes = (
             NavigateToNamedLocation.Result.OUTCOME_SAFETY_STOP,

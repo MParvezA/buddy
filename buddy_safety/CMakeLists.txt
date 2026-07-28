@@ -79,6 +79,7 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
 
   ament_add_gtest(test_command_arbiter_core test/test_command_arbiter_core.cpp)
   target_link_libraries(test_command_arbiter_core ${PROJECT_NAME}_core)
@@ -90,17 +91,25 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_motion_graph test/test_motion_graph.cpp TIMEOUT 30)
   target_link_libraries(test_motion_graph ${PROJECT_NAME}_nodes)
+  find_package(rosgraph_msgs REQUIRED)
   ament_target_dependencies(test_motion_graph
     buddy_interfaces
     diagnostic_msgs
     geometry_msgs
     rclcpp
+    rosgraph_msgs
     sensor_msgs
   )
   set_tests_properties(
     test_motion_graph
     PROPERTIES ENVIRONMENT
       "ROS_LOG_DIR=/tmp/buddy_safety_test_logs;FASTDDS_BUILTIN_TRANSPORTS=SHM"
+  )
+
+  ament_add_pytest_test(
+    test_production_config
+    test/test_production_config.py
+    TIMEOUT 30
   )
 
   find_package(ament_lint_auto REQUIRED)

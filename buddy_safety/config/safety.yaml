@@ -33,7 +33,7 @@
     obstacle_rear_arc_degrees: 60.0
     obstacle_stop_all_motion: true
     obstacle_scale_angular: true
-    require_controller_diagnostics: false
+    require_controller_diagnostics: true
     controller_diagnostics_timeout_ms: 500.0
     controller_diagnostic_name: buddy_base_controller
     diagnostics_topic: /diagnostics

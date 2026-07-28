@@ -380,13 +380,27 @@ TEST(SafetyCore, ControllerWatchdogStopsForMissingFaultedAndStaleHealth)
   EXPECT_TRUE(decision.motion_permitted);
   EXPECT_GT(decision.output.twist.linear.x, 0.0);
 
-  decision = safety.evaluate(now + 700000000, now + 700000000);
+  // A periodic healthy heartbeat keeps authorization alive even when ROS time
+  // is paused. Controller liveness is deliberately based on steady time.
+  safety.set_controller_health(true, now + 400000000);
+  decision = safety.evaluate(now + 200000000, now + 700000000);
+  EXPECT_TRUE(decision.motion_permitted);
+  EXPECT_GT(decision.output.twist.linear.x, 0.0);
+
+  // ROS time remains fixed while steady time exceeds the watchdog deadline.
+  decision = safety.evaluate(now + 200000000, now + 1000000000);
   EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_FAULT);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_CONTROLLER_FAULT);
   EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
 
-  safety.set_controller_health(false, now + 700000000);
-  decision = safety.evaluate(now + 800000000, now + 800000000);
+  safety.set_controller_health(false, now + 1000000000);
+  decision = safety.evaluate(now + 200000000, now + 1100000000);
   EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_FAULT);
+
+  safety.set_controller_health(true, now + 1100000000);
+  decision = safety.evaluate(now + 200000000, now + 1200000000);
+  EXPECT_TRUE(decision.motion_permitted);
+  EXPECT_GT(decision.output.twist.linear.x, 0.0);
 }
 
 }  // namespace

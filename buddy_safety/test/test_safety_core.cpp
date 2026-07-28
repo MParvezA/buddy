@@ -196,6 +196,52 @@ TEST(SafetyCore, RotationStopsForCloseObstacleAnywhereAroundRobot)
   EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_COLLISION_RISK);
 }
 
+TEST(SafetyCore, InvalidSideSectorMakesRequiredScanUnhealthyForRotation)
+{
+  auto config = permissive_config();
+  config.require_scan = true;
+  config.obstacle_stop_all_motion = false;
+  const std::int64_t now = 10 * kSecond;
+  buddy_safety::SafetyCore safety(config, now - kSecond);
+
+  ASSERT_TRUE(safety.submit_command(command(now, 0.0, 0.6), now, now));
+  std::string reason;
+  EXPECT_FALSE(safety.submit_scan(
+      scan(
+        now, std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN()),
+      now, now, &reason));
+  EXPECT_EQ(reason, "scan has incomplete valid all-around angular coverage");
+
+  const auto decision = safety.evaluate(now + 100000000, now + 100000000);
+  EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(decision.output.twist.angular.z, 0.0);
+  EXPECT_FALSE(decision.motion_permitted);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_FAULT);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_SENSOR_UNHEALTHY);
+}
+
+TEST(SafetyCore, FullKnownClearAllAroundCoveragePermitsRotation)
+{
+  auto config = permissive_config();
+  config.require_scan = true;
+  config.obstacle_stop_all_motion = false;
+  const std::int64_t now = 10 * kSecond;
+  buddy_safety::SafetyCore safety(config, now - kSecond);
+
+  ASSERT_TRUE(safety.submit_command(command(now, 0.0, 0.6), now, now));
+  ASSERT_TRUE(safety.submit_scan(
+      scan(now, std::numeric_limits<float>::infinity()), now, now));
+
+  const auto decision = safety.evaluate(now + 100000000, now + 100000000);
+  EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(decision.output.twist.angular.z, 0.6);
+  EXPECT_TRUE(decision.motion_permitted);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_NORMAL);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_NONE);
+}
+
 TEST(SafetyCore, RejectsMalformedOrInsufficientDirectionalScanCoverage)
 {
   auto config = permissive_config();

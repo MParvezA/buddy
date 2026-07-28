@@ -12,8 +12,8 @@ from action_msgs.msg import GoalStatus
 from buddy_capabilities.catalog import TYPE_STRING
 from buddy_interfaces.action import ExecuteTask, NavigateToNamedLocation, Speak
 from buddy_interfaces.msg import (
-    NamedLocation, RobotStatus, SafetyState, TaskArgument, TaskPlan, TaskStep, TaskStepResult,
-    WorldSummary)
+    EmergencyStopRequest, NamedLocation, RobotStatus, SafetyState, TaskArgument, TaskPlan,
+    TaskStep, TaskStepResult, WorldSummary)
 from buddy_task_executor.executive import TaskExecutive
 from diagnostic_msgs.msg import DiagnosticStatus
 import rclpy
@@ -71,6 +71,37 @@ class FakeLowerGoal:
         return cancellation
 
 
+class MockSafetyEmergencyStopConsumer(Node):
+    """Minimal frozen-contract consumer that models latched zero-motion safety."""
+
+    def __init__(self):
+        super().__init__('task_executive_safety_probe')
+        emergency_qos = QoSProfile(
+            depth=10, reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE)
+        self.event = threading.Event()
+        self.request = None
+        self.motion_permitted = True
+        self.safe_linear_velocity = 1.0
+        self._subscription = self.create_subscription(
+            EmergencyStopRequest, '/buddy/safety/emergency_stop/request',
+            self._receive, emergency_qos)
+
+    def reset_observation(self):
+        self.event.clear()
+        self.request = None
+        self.motion_permitted = True
+        self.safe_linear_velocity = 1.0
+
+    def _receive(self, request):
+        self.request = request
+        # Mirrors the frozen safety contract: every emergency-stop request
+        # latches motion inhibition and commands zero until explicit reset.
+        self.motion_permitted = False
+        self.safe_linear_velocity = 0.0
+        self.event.set()
+
+
 class TaskExecutiveComponentTest(unittest.TestCase):
 
     @classmethod
@@ -83,8 +114,9 @@ class TaskExecutiveComponentTest(unittest.TestCase):
             Parameter('cancellation_wait_seconds', Parameter.Type.DOUBLE, 0.3)])
         cls.mocks = MockCapabilityActionServers()
         cls.probe = Node('task_executive_component_probe')
+        cls.safety_probe = MockSafetyEmergencyStopConsumer()
         cls.executor = MultiThreadedExecutor(num_threads=4)
-        for node in (cls.executive, cls.mocks, cls.probe):
+        for node in (cls.executive, cls.mocks, cls.probe, cls.safety_probe):
             cls.executor.add_node(node)
         cls.spin_thread = threading.Thread(target=cls.executor.spin, daemon=True)
         cls.spin_thread.start()
@@ -113,7 +145,7 @@ class TaskExecutiveComponentTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.executor.shutdown()
         cls.spin_thread.join(timeout=2.0)
-        for node in (cls.probe, cls.mocks, cls.executive):
+        for node in (cls.safety_probe, cls.probe, cls.mocks, cls.executive):
             node.destroy_node()
         rclpy.shutdown()
 
@@ -159,6 +191,14 @@ class TaskExecutiveComponentTest(unittest.TestCase):
                     return
             time.sleep(0.01)
         self.fail('lower action quarantine did not release after terminal completion')
+
+    def _wait_until(self, predicate, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail('timed out waiting for expected condition')
 
     def test_executes_speak_through_deterministic_mock_action(self):
         wrapped = self._wrapped_result(self._plan('speak'))
@@ -314,6 +354,81 @@ class TaskExecutiveComponentTest(unittest.TestCase):
                 self.assertEqual(
                     recovery.result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
 
+    def test_unconfirmed_navigation_cancellation_latches_frozen_emergency_stop(self):
+        """A live navigation action that will not cancel escalates to safety."""
+        lower_goal = FakeLowerGoal(cancel_timeout_attempts=10)
+        submission = Future()
+        submission.set_result(lower_goal)
+        self.safety_probe.reset_observation()
+        with patch.object(
+                self.executive._navigate_client, 'send_goal_async',
+                return_value=submission):
+            active = self._send(self._plan('navigate_to', 'location', 'kitchen'))
+            time.sleep(0.05)
+            wait(active.cancel_goal_async())
+            wrapped = wait(active.get_result_async())
+
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertIn('cancellation acknowledgement timed out', wrapped.result.message)
+        with self.executive._lock:
+            self.assertIs(self.executive._quarantined_lower_goal, lower_goal)
+
+        self.assertTrue(self.safety_probe.event.wait(1.0))
+        request = self.safety_probe.request
+        self.assertEqual(request.source, 'buddy_task_executor')
+        self.assertEqual(
+            request.reason_code, EmergencyStopRequest.REASON_SYSTEM_FAULT)
+        self.assertEqual(len(request.request_id.uuid), 16)
+        self.assertIn('unresolved lower action cancellation', request.reason)
+        self.assertFalse(self.safety_probe.motion_permitted)
+        self.assertEqual(self.safety_probe.safe_linear_velocity, 0.0)
+
+        # Discovery represents the KeepLast depth as zero on this Jazzy/Fast
+        # DDS combination, so inspect the publisher's configured QoS directly.
+        qos = self.executive._emergency_stop.qos_profile
+        self.assertEqual(qos.depth, 10)
+        self.assertEqual(qos.reliability, ReliabilityPolicy.RELIABLE)
+        self.assertEqual(qos.durability, DurabilityPolicy.VOLATILE)
+
+        terminal = NavigateToNamedLocation.Result()
+        terminal.outcome = NavigateToNamedLocation.Result.OUTCOME_CANCELLED
+        lower_goal._result.set_result(SimpleNamespace(
+            status=GoalStatus.STATUS_CANCELED, result=terminal))
+        self._wait_for_quarantine_release()
+
+    def test_late_pending_submission_is_canceled_and_quarantined_until_terminal(self):
+        """A post-timeout accepted submission cannot create an ownership gap."""
+        submission = Future()
+        lower_goal = FakeLowerGoal()
+        self.safety_probe.reset_observation()
+        with patch.object(
+                self.executive._speak_client, 'send_goal_async',
+                return_value=submission):
+            active = self._send(self._plan('speak'))
+            time.sleep(0.05)
+            wait(active.cancel_goal_async())
+            wrapped = wait(active.get_result_async())
+
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertIn('goal submission did not resolve', wrapped.result.message)
+        with self.executive._lock:
+            self.assertIs(self.executive._quarantined_lower_submission, submission)
+        self.assertTrue(self.safety_probe.event.wait(1.0))
+
+        submission.set_result(lower_goal)
+        self._wait_until(lambda: lower_goal.cancel_attempts == 1)
+        with self.executive._lock:
+            self.assertIs(self.executive._quarantined_lower_goal, lower_goal)
+            self.assertIsNotNone(self.executive._quarantined_lower_result)
+
+        terminal = Speak.Result()
+        terminal.outcome = Speak.Result.OUTCOME_CANCELLED
+        lower_goal._result.set_result(SimpleNamespace(
+            status=GoalStatus.STATUS_CANCELED, result=terminal))
+        self._wait_for_quarantine_release()
+
     def test_unknown_capability_returns_structured_rejection_without_side_effect(self):
         before = len(self.mocks.speak_requests)
         result = self._result(self._plan('not_registered', argument_name=''))
@@ -445,6 +560,59 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         # remains an aborted transport result with a structured cancelled payload.
         self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
         self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
+
+    def test_shutdown_keeps_unconfirmed_lower_action_owned_and_escalates(self):
+        """Process shutdown never reports full drain while a lower action is live."""
+        lower_goal = FakeLowerGoal(cancel_timeout_attempts=10)
+        submission = Future()
+        submission.set_result(lower_goal)
+        self.safety_probe.reset_observation()
+        with patch.object(
+                self.executive._navigate_client, 'send_goal_async',
+                return_value=submission):
+            active = self._send(self._plan('navigate_to', 'location', 'kitchen'))
+            time.sleep(0.05)
+            self.executive.request_shutdown()
+            wrapped = wait(active.get_result_async())
+
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertFalse(self.executive.shutdown_complete())
+        self.assertTrue(self.safety_probe.event.wait(1.0))
+        self.assertEqual(
+            self.safety_probe.request.reason_code,
+            EmergencyStopRequest.REASON_SYSTEM_FAULT)
+        self.assertFalse(self.safety_probe.motion_permitted)
+        self.assertEqual(self.safety_probe.safe_linear_velocity, 0.0)
+
+        terminal = NavigateToNamedLocation.Result()
+        terminal.outcome = NavigateToNamedLocation.Result.OUTCOME_CANCELLED
+        lower_goal._result.set_result(SimpleNamespace(
+            status=GoalStatus.STATUS_CANCELED, result=terminal))
+        self._wait_for_quarantine_release()
+        self.assertTrue(self.executive.shutdown_complete())
+
+    def test_shutdown_deadline_escalates_an_inflight_lower_action_before_teardown(self):
+        """The final bounded-teardown report cannot silently drop ownership."""
+        lower_goal = FakeLowerGoal()
+        self.executive._set_active_lower_goal(lower_goal, lower_goal.get_result_async())
+        self.safety_probe.reset_observation()
+        self.executive._report_unresolved_lower_shutdown('bounded shutdown deadline expired')
+
+        self.assertTrue(self.safety_probe.event.wait(1.0))
+        self.assertEqual(
+            self.safety_probe.request.reason_code,
+            EmergencyStopRequest.REASON_SYSTEM_FAULT)
+        with self.executive._lock:
+            self.assertIs(self.executive._quarantined_lower_goal, lower_goal)
+        terminal = Speak.Result()
+        terminal.outcome = Speak.Result.OUTCOME_CANCELLED
+        lower_goal._result.set_result(SimpleNamespace(
+            status=GoalStatus.STATUS_CANCELED, result=terminal))
+        self._wait_for_quarantine_release()
+        with self.executive._lock:
+            self.executive._active_lower_goal = None
+            self.executive._active_lower_result = None
 
     def test_terminal_navigation_failures_are_structured_without_retry(self):
         terminal_outcomes = (

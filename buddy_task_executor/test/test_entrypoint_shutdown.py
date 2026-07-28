@@ -142,7 +142,7 @@ class EntrypointShutdownTest(unittest.TestCase):
     def test_sigint_requests_and_drains_active_task_before_destroying_node(self):
         events = []
         node = Mock()
-        node.shutdown_complete.side_effect = [False, True]
+        node.shutdown_complete.side_effect = [False, True, True]
         node.shutdown_timeout_seconds.return_value = 0.5
         node.request_shutdown.side_effect = lambda: events.append('request_shutdown')
         node.destroy_node.side_effect = lambda: events.append('destroy_node')

@@ -13,6 +13,7 @@ from nav2_msgs.action import NavigateToPose
 import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.clock import Clock, ClockType
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -36,6 +37,7 @@ LAUNCH_SIGINT_GRACE_SEC = 5.0
 ACTIVE_SHUTDOWN_TIMEOUT_SEC = 4.0
 EXECUTOR_DRAIN_TIMEOUT_SEC = 0.25
 WORKER_JOIN_TIMEOUT_SEC = 0.25
+OWNER_STATUS_HEARTBEAT_PERIOD_SEC = 0.1
 
 
 class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
@@ -162,6 +164,10 @@ class NamedNavigationAdapter(Node):
         self.declare_parameter('dependency_timeout_sec', 2.0)
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter(
+            'owner_status_heartbeat_period_sec',
+            OWNER_STATUS_HEARTBEAT_PERIOD_SEC,
+        )
 
         self._shutdown_requested = threading.Event()
         self._execution_idle = threading.Event()
@@ -214,6 +220,20 @@ class NamedNavigationAdapter(Node):
             cancel_callback=self._accept_cancel,
             callback_group=self._group,
         )
+        owner_heartbeat_period_sec = float(
+            self.get_parameter('owner_status_heartbeat_period_sec').value
+        )
+        if owner_heartbeat_period_sec <= 0.0:
+            raise ValueError(
+                'owner_status_heartbeat_period_sec must be positive'
+            )
+        self._owner_status_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self._owner_status_timer = self.create_timer(
+            owner_heartbeat_period_sec,
+            self._publish_owner_status_heartbeat,
+            callback_group=self._group,
+            clock=self._owner_status_clock,
+        )
         self._publish_diagnostic(DiagnosticStatus.OK, 'ready', 'adapter is ready')
 
     def _on_safety(self, message: SafetyState) -> None:
@@ -233,6 +253,16 @@ class NamedNavigationAdapter(Node):
 
     def _accept_cancel(self, _goal_handle) -> CancelResponse:
         return CancelResponse.ACCEPT
+
+    def _publish_owner_status_heartbeat(self) -> None:
+        with self._goal_lock:
+            goal_reserved = self._goal_reserved
+        if not goal_reserved:
+            return
+        with self._owned_entity_lock:
+            if not self._action_destroyed:
+                # Jazzy exposes status publication through the action handle.
+                self._action._handle.publish_status()
 
     def _motion_permitted(self) -> bool:
         return bool(
@@ -492,6 +522,13 @@ class NamedNavigationAdapter(Node):
         """Idempotently destroy action waitables before destroying the node."""
         with self._owned_entity_lock:
             if not self._action_destroyed:
+                owner_status_timer = getattr(
+                    self,
+                    '_owner_status_timer',
+                    None,
+                )
+                if owner_status_timer is not None:
+                    owner_status_timer.cancel()
                 self._action.destroy()
                 self._action_destroyed = True
             if not self._nav2_destroyed:

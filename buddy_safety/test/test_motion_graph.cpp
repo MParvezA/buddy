@@ -19,6 +19,7 @@
 #include "diagnostic_msgs/msg/diagnostic_array.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rosgraph_msgs/msg/clock.hpp"
 
 #include "buddy_safety/command_arbiter_node.hpp"
 #include "buddy_safety/safety_filter_node.hpp"
@@ -71,6 +72,7 @@ TEST(MotionGraph, EnforcesPublisherBoundaryPriorityLatchAndResetService)
       rclcpp::Parameter("publish_rate_hz", 100.0),
       rclcpp::Parameter("startup_inhibit_ms", 0.0),
       rclcpp::Parameter("require_scan", false),
+      rclcpp::Parameter("require_controller_diagnostics", false),
       rclcpp::Parameter("max_linear_acceleration", 1000.0),
       rclcpp::Parameter("max_angular_acceleration", 1000.0),
     });
@@ -258,6 +260,173 @@ TEST(MotionGraph, EnforcesPublisherBoundaryPriorityLatchAndResetService)
   (void)safe_subscription;
   (void)state_subscription;
   (void)diagnostics_subscription;
+}
+
+TEST(MotionGraph, ControllerHeartbeatFailsClosedAndUsesSteadyTime)
+{
+  rclcpp::init(0, nullptr);
+  auto safety_options = rclcpp::NodeOptions().parameter_overrides(
+    {
+      rclcpp::Parameter("use_sim_time", true),
+      rclcpp::Parameter("publish_rate_hz", 100.0),
+      rclcpp::Parameter("startup_inhibit_ms", 0.0),
+      rclcpp::Parameter("require_scan", false),
+      rclcpp::Parameter("require_controller_diagnostics", true),
+      rclcpp::Parameter("controller_diagnostics_timeout_ms", 150.0),
+      rclcpp::Parameter("controller_diagnostic_name", "buddy_base_controller"),
+      rclcpp::Parameter("command_timeout_ms", 2000.0),
+      rclcpp::Parameter("max_linear_acceleration", 1000.0),
+      rclcpp::Parameter("max_angular_acceleration", 1000.0),
+    });
+  auto safety = std::make_shared<buddy_safety::SafetyFilterNode>(safety_options);
+  auto probe_options = rclcpp::NodeOptions().parameter_overrides(
+    {rclcpp::Parameter("use_sim_time", true)});
+  auto probe = std::make_shared<rclcpp::Node>("controller_health_probe", probe_options);
+  auto clock_source = std::make_shared<rclcpp::Node>("controller_health_clock_source");
+
+  const auto motion_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
+  const auto diagnostics_qos =
+    rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile();
+  auto command_publisher =
+    probe->create_publisher<geometry_msgs::msg::TwistStamped>(
+    "/buddy/motion/arbitrated_cmd_vel", motion_qos);
+  auto diagnostics_publisher =
+    probe->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+    "/diagnostics", diagnostics_qos);
+  auto clock_publisher = clock_source->create_publisher<rosgraph_msgs::msg::Clock>(
+    "/clock", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile());
+
+  std::mutex observation_mutex;
+  geometry_msgs::msg::TwistStamped safe;
+  buddy_interfaces::msg::SafetyState state;
+  std::atomic<int> safe_count{0};
+  std::atomic<int> state_count{0};
+  auto safe_subscription = probe->create_subscription<geometry_msgs::msg::TwistStamped>(
+    "/buddy/motion/safe_cmd_vel", motion_qos,
+    [&](const geometry_msgs::msg::TwistStamped & message) {
+      std::lock_guard<std::mutex> lock(observation_mutex);
+      safe = message;
+      ++safe_count;
+    });
+  auto state_subscription = probe->create_subscription<buddy_interfaces::msg::SafetyState>(
+    "/buddy/safety/state",
+    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
+    [&](const buddy_interfaces::msg::SafetyState & message) {
+      std::lock_guard<std::mutex> lock(observation_mutex);
+      state = message;
+      ++state_count;
+    });
+
+  rclcpp::executors::MultiThreadedExecutor executor;
+  executor.add_node(safety);
+  executor.add_node(probe);
+  executor.add_node(clock_source);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  ASSERT_TRUE(wait_until(
+      [&]() {
+        return command_publisher->get_subscription_count() == 1 &&
+               diagnostics_publisher->get_subscription_count() == 1 &&
+               clock_publisher->get_subscription_count() >= 2;
+      }, 2s));
+
+  rosgraph_msgs::msg::Clock fixed_clock;
+  fixed_clock.clock.sec = 10;
+  ASSERT_TRUE(wait_until(
+      [&]() {
+        clock_publisher->publish(fixed_clock);
+        return safety->now().nanoseconds() == 10LL * 1000000000LL &&
+               probe->now().nanoseconds() == 10LL * 1000000000LL;
+      }, 2s));
+
+  geometry_msgs::msg::TwistStamped command;
+  command.header.stamp = fixed_clock.clock;
+  command.twist.linear.x = 0.3;
+  command_publisher->publish(command);
+
+  // No matching controller status is fail-closed.
+  ASSERT_TRUE(wait_until(
+      [&]() {
+        std::lock_guard<std::mutex> lock(observation_mutex);
+        return state_count > 0 && safe_count > 0 &&
+               state.state == buddy_interfaces::msg::SafetyState::STATE_FAULT &&
+               state.reason_code ==
+               buddy_interfaces::msg::SafetyState::REASON_CONTROLLER_FAULT &&
+               safe.twist.linear.x == 0.0 && safe.twist.angular.z == 0.0;
+      }, 2s));
+
+  diagnostic_msgs::msg::DiagnosticArray diagnostic;
+  diagnostic_msgs::msg::DiagnosticStatus status;
+  status.name = "some_other_controller";
+  status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+  diagnostic.status.push_back(status);
+  diagnostics_publisher->publish(diagnostic);
+  std::this_thread::sleep_for(50ms);
+  {
+    std::lock_guard<std::mutex> lock(observation_mutex);
+    EXPECT_EQ(state.state, buddy_interfaces::msg::SafetyState::STATE_FAULT);
+    EXPECT_DOUBLE_EQ(safe.twist.linear.x, 0.0);
+  }
+
+  diagnostic.status.front().name = "buddy_base_controller";
+  diagnostic.status.front().level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+  diagnostics_publisher->publish(diagnostic);
+  std::this_thread::sleep_for(50ms);
+  {
+    std::lock_guard<std::mutex> lock(observation_mutex);
+    EXPECT_EQ(state.state, buddy_interfaces::msg::SafetyState::STATE_FAULT);
+    EXPECT_DOUBLE_EQ(safe.twist.linear.x, 0.0);
+  }
+
+  // Repeated OK heartbeats and fresh commands restore and sustain motion.
+  diagnostic.status.front().level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+  const auto heartbeat_deadline = std::chrono::steady_clock::now() + 400ms;
+  while (std::chrono::steady_clock::now() < heartbeat_deadline) {
+    diagnostics_publisher->publish(diagnostic);
+    command_publisher->publish(command);
+    std::this_thread::sleep_for(40ms);
+  }
+  ASSERT_TRUE(wait_until(
+      [&]() {
+        std::lock_guard<std::mutex> lock(observation_mutex);
+        return state.motion_permitted &&
+               state.state != buddy_interfaces::msg::SafetyState::STATE_FAULT &&
+               safe.twist.linear.x > 0.0;
+      }, 1s));
+
+  // Stop only the controller heartbeat. ROS time remains paused at 10 seconds,
+  // while the wall timer and steady watchdog continue to run.
+  const auto prior_state_count = state_count.load();
+  const auto stale_deadline = std::chrono::steady_clock::now() + 350ms;
+  while (std::chrono::steady_clock::now() < stale_deadline) {
+    command_publisher->publish(command);
+    std::this_thread::sleep_for(40ms);
+  }
+  ASSERT_EQ(safety->now().nanoseconds(), 10LL * 1000000000LL);
+  ASSERT_GT(state_count.load(), prior_state_count);
+  ASSERT_TRUE(wait_until(
+      [&]() {
+        std::lock_guard<std::mutex> lock(observation_mutex);
+        return state.state == buddy_interfaces::msg::SafetyState::STATE_FAULT &&
+               state.reason_code ==
+               buddy_interfaces::msg::SafetyState::REASON_CONTROLLER_FAULT &&
+               safe.twist.linear.x == 0.0 && safe.twist.angular.z == 0.0;
+      }, 1s));
+
+  diagnostics_publisher->publish(diagnostic);
+  command_publisher->publish(command);
+  ASSERT_TRUE(wait_until(
+      [&]() {
+        std::lock_guard<std::mutex> lock(observation_mutex);
+        return state.motion_permitted && safe.twist.linear.x > 0.0;
+      }, 1s));
+
+  executor.cancel();
+  spin_thread.join();
+  rclcpp::shutdown();
+
+  (void)safe_subscription;
+  (void)state_subscription;
 }
 
 }  // namespace

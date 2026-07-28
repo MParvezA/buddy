@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from action_msgs.msg import GoalStatus
 from buddy_capabilities.catalog import TYPE_STRING
-from buddy_interfaces.action import ExecuteTask, NavigateToNamedLocation
+from buddy_interfaces.action import ExecuteTask, NavigateToNamedLocation, Speak
 from buddy_interfaces.msg import (
     NamedLocation, RobotStatus, SafetyState, TaskArgument, TaskPlan, TaskStep, TaskStepResult,
     WorldSummary)
@@ -46,17 +46,24 @@ class FakeLowerGoal:
 
     accepted = True
 
-    def __init__(self, *, result_error=None, cancel_error=None):
+    def __init__(
+            self, *, result_error=None, cancel_error=None,
+            cancel_timeout_attempts=0):
         self._result = Future()
         if result_error is not None:
             self._result.set_exception(result_error)
         self._cancel_error = cancel_error
+        self._cancel_timeout_attempts = cancel_timeout_attempts
+        self.cancel_attempts = 0
 
     def get_result_async(self):
         return self._result
 
     def cancel_goal_async(self):
+        self.cancel_attempts += 1
         cancellation = Future()
+        if self.cancel_attempts <= self._cancel_timeout_attempts:
+            return cancellation
         if self._cancel_error is not None:
             cancellation.set_exception(self._cancel_error)
         else:
@@ -144,6 +151,15 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         goal.plan = plan
         return wait(self.client.send_goal_async(goal, feedback_callback=feedback_callback))
 
+    def _wait_for_quarantine_release(self, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.executive._lock:
+                if not self.executive._has_quarantined_lower_action_locked():
+                    return
+            time.sleep(0.01)
+        self.fail('lower action quarantine did not release after terminal completion')
+
     def test_executes_speak_through_deterministic_mock_action(self):
         wrapped = self._wrapped_result(self._plan('speak'))
         result = wrapped.result
@@ -215,6 +231,7 @@ class TaskExecutiveComponentTest(unittest.TestCase):
 
     def test_cancel_future_exception_is_structured_and_releases_reservation(self):
         lower_goal = FakeLowerGoal(
+            result_error=RuntimeError('lower action reached terminal transport failure'),
             cancel_error=RuntimeError('cancel transport failed'))
         submission = Future()
         submission.set_result(lower_goal)
@@ -233,6 +250,69 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         recovery = self._wrapped_result(self._plan('speak'))
         self.assertEqual(recovery.status, GoalStatus.STATUS_SUCCEEDED)
         self.assertEqual(recovery.result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
+
+    def test_unconfirmed_lower_cancellation_quarantines_side_effects_until_stop_confirms(self):
+        """A bounded outer failure must not orphan a possibly live lower action."""
+        cases = (
+            ('cancellation acknowledgement timed out', 1),
+            ('did not reach a terminal result after cancellation', 0),
+        )
+        for expected_message, cancel_timeout_attempts in cases:
+            with self.subTest(expected_message=expected_message):
+                lower_goal = FakeLowerGoal(
+                    cancel_timeout_attempts=cancel_timeout_attempts)
+                submission = Future()
+                submission.set_result(lower_goal)
+                with patch.object(
+                        self.executive._speak_client, 'send_goal_async',
+                        return_value=submission):
+                    active = self._send(self._plan('speak'))
+                    time.sleep(0.05)
+                    wait(active.cancel_goal_async())
+                    wrapped = wait(active.get_result_async())
+
+                self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+                self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+                self.assertIn(expected_message, wrapped.result.message)
+                with self.executive._lock:
+                    self.assertIs(self.executive._quarantined_lower_goal, lower_goal)
+                    self.assertIsNotNone(self.executive._quarantined_lower_result)
+
+                with patch.object(self.executive._diagnostics, 'publish') as publish:
+                    self.executive._publish_diagnostics()
+                diagnostic = publish.call_args.args[0].status[0]
+                self.assertEqual(diagnostic.level, DiagnosticStatus.ERROR)
+                self.assertIn('cancellation unresolved', diagnostic.message)
+
+                blocked = self._wrapped_result(self._plan('speak'))
+                self.assertEqual(blocked.status, GoalStatus.STATUS_ABORTED)
+                self.assertEqual(blocked.result.outcome, ExecuteTask.Result.OUTCOME_REJECTED)
+                self.assertIn('only registered stop is allowed', blocked.result.message)
+
+                def complete_cancelled_result():
+                    time.sleep(0.05)
+                    terminal = Speak.Result()
+                    terminal.outcome = Speak.Result.OUTCOME_CANCELLED
+                    terminal.message = 'fake cancellation confirmed'
+                    lower_goal._result.set_result(SimpleNamespace(
+                        status=GoalStatus.STATUS_CANCELED, result=terminal))
+
+                finisher = threading.Thread(target=complete_cancelled_result)
+                finisher.start()
+                stop_result = self._result(self._plan('stop', argument_name=''))
+                finisher.join(timeout=1.0)
+                self.assertFalse(finisher.is_alive())
+                self.assertEqual(
+                    stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED,
+                    stop_result.message)
+                self.assertGreaterEqual(lower_goal.cancel_attempts, 2)
+                with self.executive._lock:
+                    self.assertIsNone(self.executive._quarantined_lower_goal)
+
+                recovery = self._wrapped_result(self._plan('speak'))
+                self.assertEqual(recovery.status, GoalStatus.STATUS_SUCCEEDED)
+                self.assertEqual(
+                    recovery.result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
 
     def test_unknown_capability_returns_structured_rejection_without_side_effect(self):
         before = len(self.mocks.speak_requests)
@@ -283,6 +363,8 @@ class TaskExecutiveComponentTest(unittest.TestCase):
             self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
             self.assertEqual(wrapped.result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
             self.assertIn('cancellation', wrapped.result.message)
+            with self.executive._lock:
+                self.assertIsNone(self.executive._quarantined_lower_goal)
 
     def test_registered_stop_cancels_an_active_task(self):
         self.mocks.hold_speak = True
@@ -322,6 +404,7 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         finally:
             self.mocks.hold_speak = False
             self.mocks.accept_cancellation = True
+        self._wait_for_quarantine_release()
         self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
         self.assertEqual(stop_result.step_results[0].outcome, 4)
         self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_FAILED)

@@ -129,7 +129,17 @@ class TaskExecutive(Node):
         self._status = None
         self._world = None
         self._active_lower_goal = None
+        self._active_lower_result = None
         self._pending_lower_submission = None
+        # A bounded ExecuteTask result must not make an unconfirmed lower
+        # action disappear.  If its cancellation acknowledgement or terminal
+        # result cannot be observed within the bound, retain this ownership and
+        # admit only the registered stop capability until a terminal result is
+        # observed or a later stop retry confirms cancellation.
+        self._quarantined_lower_goal = None
+        self._quarantined_lower_result = None
+        self._quarantined_lower_submission = None
+        self._quarantine_reason = ''
         self._active_goal = None
         self._active_cancel_event = None
         self._execution_idle = threading.Event()
@@ -250,9 +260,13 @@ class TaskExecutive(Node):
                 return result
 
             with self._lock:
-                if self._active_goal is not None and not self._is_stop_only(plan):
+                unresolved_lower_action = self._has_quarantined_lower_action_locked()
+                if ((self._active_goal is not None or unresolved_lower_action)
+                        and not self._is_stop_only(plan)):
                     result.outcome = ExecuteTask.Result.OUTCOME_REJECTED
-                    result.message = 'another task is active'
+                    result.message = (
+                        'lower action cancellation is unresolved; only registered stop is allowed'
+                        if unresolved_lower_action else 'another task is active')
                     goal_handle.abort()
                     return result
                 if self._active_goal is None:
@@ -350,6 +364,7 @@ class TaskExecutive(Node):
                 with self._lock:
                     self._active_goal = None
                     self._active_lower_goal = None
+                    self._active_lower_result = None
                     self._pending_lower_submission = None
                     self._active_cancel_event = None
                     self._lower_cancellation_in_progress = False
@@ -449,11 +464,12 @@ class TaskExecutive(Node):
         if not goal.accepted:
             return self._step_result(step, TaskStepResult.OUTCOME_REJECTED,
                                      ERROR_CAPABILITY_UNAVAILABLE, 'speech goal rejected')
-        with self._lock:
-            self._active_lower_goal = goal
-        action_result = self._wait(goal.get_result_async(), deadline, goal_handle, goal)
+        result_future = goal.get_result_async()
+        self._set_active_lower_goal(goal, result_future)
+        action_result = self._wait(result_future, deadline, goal_handle, goal)
         with self._lock:
             self._active_lower_goal = None
+            self._active_lower_result = None
         if action_result is None:
             cancellation_failure = self._get_cancellation_failure()
             if cancellation_failure:
@@ -508,11 +524,12 @@ class TaskExecutive(Node):
             if not goal.accepted:
                 return self._step_result(step, TaskStepResult.OUTCOME_REJECTED,
                                          ERROR_CAPABILITY_UNAVAILABLE, 'navigation goal rejected')
-            with self._lock:
-                self._active_lower_goal = goal
-            action_result = self._wait(goal.get_result_async(), deadline, goal_handle, goal)
+            result_future = goal.get_result_async()
+            self._set_active_lower_goal(goal, result_future)
+            action_result = self._wait(result_future, deadline, goal_handle, goal)
             with self._lock:
                 self._active_lower_goal = None
+                self._active_lower_result = None
             if action_result is None:
                 cancellation_failure = self._get_cancellation_failure()
                 if cancellation_failure:
@@ -585,7 +602,9 @@ class TaskExecutive(Node):
         if wait_for_existing:
             timeout = self._bounded_cancellation_wait_seconds()
             if not self._lower_cancellation_complete.wait(timeout):
-                return False, 'lower action cancellation did not complete before bound'
+                result = (False, 'lower action cancellation did not complete before bound')
+                self._quarantine_unresolved_lower_action(result[1])
+                return result
             with self._lock:
                 return self._lower_cancellation_result
         result = (False, 'lower action cancellation raised an internal exception')
@@ -594,6 +613,8 @@ class TaskExecutive(Node):
         except Exception as error:  # Lower action transport failures are structured task failures.
             result = (False, 'lower action cancellation failed: ' + str(error))
         finally:
+            if not result[0]:
+                self._quarantine_unresolved_lower_action(result[1])
             with self._lock:
                 self._lower_cancellation_result = result
                 self._lower_cancellation_in_progress = False
@@ -601,9 +622,19 @@ class TaskExecutive(Node):
         return result
 
     def _cancel_lower_and_wait_once(self) -> tuple[bool, str]:
+        if self._release_quarantined_lower_if_terminal():
+            return True, 'quarantined lower action reached a terminal result'
         with self._lock:
-            goal = self._active_lower_goal
-            submission = self._pending_lower_submission
+            goal = (
+                self._quarantined_lower_goal
+                if self._quarantined_lower_goal is not None else self._active_lower_goal)
+            result_future = (
+                self._quarantined_lower_result
+                if self._quarantined_lower_goal is not None else self._active_lower_result)
+            submission = (
+                self._quarantined_lower_submission
+                if self._quarantined_lower_submission is not None
+                else self._pending_lower_submission)
         if submission is not None:
             deadline = self._cancellation_deadline()
             while not submission.done() and time.monotonic() < deadline:
@@ -611,15 +642,39 @@ class TaskExecutive(Node):
             if not submission.done():
                 return False, (
                     'lower action goal submission did not resolve before cancellation bound')
-            goal = submission.result()
+            try:
+                goal = submission.result()
+            except Exception:
+                # A failed request can never become an accepted lower action.
+                self._clear_quarantined_submission(submission)
+                return True, 'lower action goal submission failed before execution'
             if not goal.accepted:
+                self._clear_quarantined_submission(submission)
                 return True, 'lower action goal was rejected before execution'
+            result_future = goal.get_result_async()
+            quarantined_goal = False
             with self._lock:
-                self._active_lower_goal = goal
-                if self._pending_lower_submission is submission:
-                    self._pending_lower_submission = None
+                if self._quarantined_lower_submission is submission:
+                    self._quarantined_lower_submission = None
+                    self._quarantined_lower_goal = goal
+                    self._quarantined_lower_result = result_future
+                    quarantined_goal = True
+                else:
+                    self._active_lower_goal = goal
+                    self._active_lower_result = result_future
+                    if self._pending_lower_submission is submission:
+                        self._pending_lower_submission = None
+            if quarantined_goal:
+                result_future.add_done_callback(
+                    lambda done, owned_goal=goal:
+                    self._on_quarantined_lower_terminal(owned_goal, done))
         if goal is not None:
-            return self._cancel_lower_action(goal, goal.get_result_async())
+            if result_future is None:
+                result_future = goal.get_result_async()
+            result = self._cancel_lower_action(goal, result_future)
+            if result[0]:
+                self._clear_quarantined_goal(goal)
+            return result
         return True, 'no lower action was active'
 
     def _cancel_lower_action(self, goal, result_future) -> tuple[bool, str]:
@@ -672,6 +727,133 @@ class TaskExecutive(Node):
         with self._lock:
             if self._pending_lower_submission is submission:
                 self._pending_lower_submission = None
+
+    def _set_active_lower_goal(self, goal, result_future) -> None:
+        with self._lock:
+            self._active_lower_goal = goal
+            self._active_lower_result = result_future
+
+    def _has_quarantined_lower_action_locked(self) -> bool:
+        return (
+            self._quarantined_lower_goal is not None
+            or self._quarantined_lower_submission is not None)
+
+    def _quarantine_unresolved_lower_action(self, reason: str) -> None:
+        """
+        Retain ownership until a terminal lower-action result is observed.
+
+        A bounded outer task result is important for callers, but it is not
+        evidence that a lower action stopped.  This separate ownership record
+        prevents a subsequent side-effecting task from being admitted into an
+        ambiguous lower-action state.
+        """
+        terminal_to_watch = None
+        submission_to_watch = None
+        with self._lock:
+            if self._has_quarantined_lower_action_locked():
+                if not self._quarantine_reason:
+                    self._quarantine_reason = reason
+                return
+            goal = self._active_lower_goal
+            result_future = self._active_lower_result
+            submission = self._pending_lower_submission
+            if result_future is not None and result_future.done():
+                # The cancellation protocol failed, but the lower action has
+                # already reached a terminal state.  Retrieve that outcome and
+                # do not quarantine a non-running action.
+                try:
+                    result_future.result()
+                except Exception:
+                    pass
+                return
+            self._quarantine_reason = reason
+            if goal is not None:
+                if result_future is None:
+                    result_future = goal.get_result_async()
+                self._quarantined_lower_goal = goal
+                self._quarantined_lower_result = result_future
+                terminal_to_watch = (goal, result_future)
+            elif submission is not None:
+                self._quarantined_lower_submission = submission
+                submission_to_watch = submission
+        if terminal_to_watch is not None:
+            goal, result_future = terminal_to_watch
+            result_future.add_done_callback(
+                lambda done, owned_goal=goal:
+                self._on_quarantined_lower_terminal(owned_goal, done))
+        if submission_to_watch is not None:
+            submission_to_watch.add_done_callback(self._on_quarantined_submission)
+
+    def _release_quarantined_lower_if_terminal(self) -> bool:
+        with self._lock:
+            result_future = self._quarantined_lower_result
+        if result_future is None or not result_future.done():
+            return False
+        # Retrieve the terminal outcome even when it is an exception.  Either
+        # form proves that the lower action can no longer execute.
+        try:
+            result_future.result()
+        except Exception:
+            pass
+        with self._lock:
+            if self._quarantined_lower_result is result_future:
+                self._quarantined_lower_goal = None
+                self._quarantined_lower_result = None
+                self._quarantine_reason = ''
+                return True
+        return False
+
+    def _clear_quarantined_goal(self, goal) -> None:
+        with self._lock:
+            if self._quarantined_lower_goal is goal:
+                self._quarantined_lower_goal = None
+                self._quarantined_lower_result = None
+                self._quarantine_reason = ''
+
+    def _clear_quarantined_submission(self, submission) -> None:
+        with self._lock:
+            if self._quarantined_lower_submission is submission:
+                self._quarantined_lower_submission = None
+                self._quarantine_reason = ''
+
+    def _on_quarantined_lower_terminal(self, goal, result_future) -> None:
+        """Release a quarantined goal only after its terminal future resolves."""
+        # rclpy invokes this from an executor callback.  Do not block here:
+        # obtaining the result is enough to observe terminal ownership.
+        try:
+            result_future.result()
+        except Exception:
+            pass
+        self._clear_quarantined_goal(goal)
+
+    def _on_quarantined_submission(self, submission) -> None:
+        """Cancel a late accepted submission without leaving an ownership gap."""
+        try:
+            goal = submission.result()
+        except Exception:
+            self._clear_quarantined_submission(submission)
+            return
+        if not goal.accepted:
+            self._clear_quarantined_submission(submission)
+            return
+        result_future = goal.get_result_async()
+        terminal_to_watch = False
+        with self._lock:
+            if self._quarantined_lower_submission is not submission:
+                return
+            self._quarantined_lower_submission = None
+            self._quarantined_lower_goal = goal
+            self._quarantined_lower_result = result_future
+            terminal_to_watch = True
+        if terminal_to_watch:
+            result_future.add_done_callback(
+                lambda done, owned_goal=goal:
+                self._on_quarantined_lower_terminal(owned_goal, done))
+        try:
+            goal.cancel_goal_async()
+        except Exception:
+            # Retain quarantine; only a terminal lower result may release it.
+            pass
 
     def _remember_cancellation_failure(self, message: str) -> None:
         with self._lock:
@@ -764,12 +946,19 @@ class TaskExecutive(Node):
     def _publish_diagnostics(self) -> None:
         with self._lock:
             active = self._active_goal is not None
+            quarantined = self._has_quarantined_lower_action_locked()
+            quarantine_reason = self._quarantine_reason
         status = DiagnosticStatus()
         status.name = 'buddy_task_executive'
         status.hardware_id = 'buddy'
-        status.level = DiagnosticStatus.OK
-        status.message = 'task executive active'
-        status.values = [KeyValue(key='active_task', value=str(active).lower())]
+        status.level = DiagnosticStatus.ERROR if quarantined else DiagnosticStatus.OK
+        status.message = (
+            'lower action cancellation unresolved: ' + quarantine_reason
+            if quarantined else 'task executive active')
+        status.values = [
+            KeyValue(key='active_task', value=str(active).lower()),
+            KeyValue(key='lower_action_quarantined', value=str(quarantined).lower()),
+        ]
         message = DiagnosticArray()
         message.header.stamp = self.get_clock().now().to_msg()
         message.status = [status]
@@ -778,12 +967,16 @@ class TaskExecutive(Node):
     def _publish_execution_failure(self, failure_message: str) -> None:
         with self._lock:
             active = self._active_goal is not None
+            quarantined = self._has_quarantined_lower_action_locked()
         status = DiagnosticStatus()
         status.name = 'buddy_task_executive'
         status.hardware_id = 'buddy'
         status.level = DiagnosticStatus.ERROR
         status.message = failure_message
-        status.values = [KeyValue(key='active_task', value=str(active).lower())]
+        status.values = [
+            KeyValue(key='active_task', value=str(active).lower()),
+            KeyValue(key='lower_action_quarantined', value=str(quarantined).lower()),
+        ]
         message = DiagnosticArray()
         message.header.stamp = self.get_clock().now().to_msg()
         message.status = [status]

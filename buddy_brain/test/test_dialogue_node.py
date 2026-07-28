@@ -10,6 +10,7 @@ os.environ.setdefault("ROS_LOG_DIR", "/tmp/buddy_brain_test_logs")
 
 import rclpy
 
+from action_msgs.msg import GoalStatus
 from buddy_brain.dialogue_core import DialogueEffect, ValidatedPlan
 from buddy_brain.dialogue_node import DialogueNode
 from buddy_interfaces.action import ExecuteTask
@@ -27,11 +28,56 @@ class _CapabilityFuture:
 
 class _ResultFuture:
 
-    def __init__(self, result):
+    def __init__(self, result=None, status=GoalStatus.STATUS_SUCCEEDED, error=None):
         self._result = result
+        self._status = status
+        self._error = error
 
     def result(self):
-        return type("WrappedResult", (), {"result": self._result})()
+        if self._error is not None:
+            raise self._error
+        return type(
+            "WrappedResult",
+            (),
+            {"result": self._result, "status": self._status},
+        )()
+
+
+class _GoalFuture:
+
+    def __init__(self, goal_handle):
+        self._goal_handle = goal_handle
+
+    def result(self):
+        return self._goal_handle
+
+
+class _RejectedGoal:
+
+    accepted = False
+
+    @staticmethod
+    def get_result_async():
+        raise AssertionError("rejected goal must not request a result")
+
+
+class _DiagnosticSink:
+
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
+def _result_effect(node, status, custom_outcome, message=""):
+    action_result = ExecuteTask.Result()
+    action_result.outcome = custom_outcome
+    action_result.message = message
+    responses = []
+    node._dispatch = responses.extend
+    node._on_execute_result(_ResultFuture(action_result, status))
+    return responses[0]
 
 
 def test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary():
@@ -58,7 +104,8 @@ def test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boun
         action_result.message = "Status reported."
         responses = []
         node._dispatch = responses.extend
-        node._on_execute_result(_ResultFuture(action_result))
+        node._on_execute_result(
+            _ResultFuture(action_result, GoalStatus.STATUS_SUCCEEDED))
         assert responses[0].kind == "speak"
         assert responses[0].text == "Status reported."
 
@@ -66,5 +113,117 @@ def test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boun
         assert all(not topic.startswith("/buddy/motion/") for topic in publisher_topics)
         assert "/diagnostics" in publisher_topics
     finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_execute_result_requires_consistent_ros_and_custom_success():
+    rclpy.init()
+    node = DialogueNode()
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    try:
+        cases = (
+            (
+                GoalStatus.STATUS_ABORTED,
+                ExecuteTask.Result.OUTCOME_SUCCEEDED,
+                "Task execution failed.",
+            ),
+            (
+                GoalStatus.STATUS_CANCELED,
+                ExecuteTask.Result.OUTCOME_CANCELLED,
+                "The task was canceled.",
+            ),
+            (
+                GoalStatus.STATUS_UNKNOWN,
+                ExecuteTask.Result.OUTCOME_SUCCEEDED,
+                "Task execution returned an unknown status.",
+            ),
+            (
+                255,
+                ExecuteTask.Result.OUTCOME_SUCCEEDED,
+                "Task execution returned an unknown status.",
+            ),
+            (
+                GoalStatus.STATUS_SUCCEEDED,
+                ExecuteTask.Result.OUTCOME_FAILED,
+                "Task execution returned an inconsistent result.",
+            ),
+        )
+        for status, custom_outcome, expected in cases:
+            effect = _result_effect(
+                node, status, custom_outcome, "unsafe success text")
+            assert effect.kind == "speak"
+            assert effect.text == expected
+            assert "success" not in effect.text.lower()
+            diagnostic = diagnostics.messages[-1].status[0]
+            assert diagnostic.message == expected
+            expected_level = (
+                diagnostic.WARN
+                if status == GoalStatus.STATUS_CANCELED
+                else diagnostic.ERROR
+            )
+            assert diagnostic.level == expected_level
+    finally:
+        node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_execute_result_true_success_and_transport_exception_are_deterministic():
+    rclpy.init()
+    node = DialogueNode()
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    try:
+        succeeded = _result_effect(
+            node,
+            GoalStatus.STATUS_SUCCEEDED,
+            ExecuteTask.Result.OUTCOME_SUCCEEDED,
+            "Task completed.",
+        )
+        assert succeeded.text == "Task completed."
+        assert diagnostics.messages == []
+
+        responses = []
+        node._dispatch = responses.extend
+        node._on_execute_result(
+            _ResultFuture(error=RuntimeError("result transport failed")))
+        assert responses[0].text == "Task execution failed: result transport failed"
+        assert "success" not in responses[0].text.lower()
+        diagnostic = diagnostics.messages[-1].status[0]
+        assert diagnostic.level == diagnostic.ERROR
+        assert diagnostic.message == responses[0].text
+
+        responses.clear()
+        node._on_execute_goal(_GoalFuture(_RejectedGoal()))
+        assert responses[0].text == "The task was rejected."
+        assert diagnostics.messages[-1].status[0].level == diagnostic.WARN
+    finally:
+        node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_invalid_execute_goal_handle_is_structured_failure():
+    rclpy.init()
+    node = DialogueNode()
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    try:
+        responses = []
+        node._dispatch = responses.extend
+        node._on_execute_goal(_GoalFuture(None))
+        assert responses[0].kind == "speak"
+        assert responses[0].text == "Task execution could not be started."
+        assert "success" not in responses[0].text.lower()
+        diagnostic = diagnostics.messages[-1].status[0]
+        assert diagnostic.level == diagnostic.ERROR
+        assert diagnostic.message == responses[0].text
+    finally:
+        node._diagnostics_publisher = publisher
         node.destroy_node()
         rclpy.shutdown()

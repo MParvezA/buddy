@@ -9,7 +9,8 @@ from buddy_capabilities.catalog import (
     ERROR_CAPABILITY_UNAVAILABLE, ERROR_PRECONDITION, ERROR_TIMEOUT, schema_for,
     validate_arguments)
 from buddy_interfaces.action import ExecuteTask, NavigateToNamedLocation, Speak
-from buddy_interfaces.msg import RobotStatus, SafetyState, TaskStepResult, WorldSummary
+from buddy_interfaces.msg import (
+    EmergencyStopRequest, RobotStatus, SafetyState, TaskStepResult, WorldSummary)
 from buddy_task_executor.validation import duration_seconds, validate_static_plan
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 import rclpy
@@ -140,6 +141,7 @@ class TaskExecutive(Node):
         self._quarantined_lower_result = None
         self._quarantined_lower_submission = None
         self._quarantine_reason = ''
+        self._quarantine_emergency_stop_sent = False
         self._active_goal = None
         self._active_cancel_event = None
         self._execution_idle = threading.Event()
@@ -154,6 +156,8 @@ class TaskExecutive(Node):
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
         diagnostics_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
                                      durability=DurabilityPolicy.VOLATILE)
+        emergency_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                                   durability=DurabilityPolicy.VOLATILE)
         self._status_subscription = self.create_subscription(
             RobotStatus, '/buddy/status', self._status_callback, state_qos)
         self._world_subscription = self.create_subscription(
@@ -168,6 +172,8 @@ class TaskExecutive(Node):
             goal_callback=self._goal_callback, cancel_callback=self._cancel_callback,
             callback_group=self._callback_group)
         self._diagnostics = self.create_publisher(DiagnosticArray, '/diagnostics', diagnostics_qos)
+        self._emergency_stop = self.create_publisher(
+            EmergencyStopRequest, '/buddy/safety/emergency_stop/request', emergency_qos)
         self._timer = self.create_timer(1.0, self._publish_diagnostics)
 
     def _status_callback(self, message: RobotStatus) -> None:
@@ -603,7 +609,7 @@ class TaskExecutive(Node):
             timeout = self._bounded_cancellation_wait_seconds()
             if not self._lower_cancellation_complete.wait(timeout):
                 result = (False, 'lower action cancellation did not complete before bound')
-                self._quarantine_unresolved_lower_action(result[1])
+                self._quarantine_and_escalate(result[1])
                 return result
             with self._lock:
                 return self._lower_cancellation_result
@@ -614,7 +620,7 @@ class TaskExecutive(Node):
             result = (False, 'lower action cancellation failed: ' + str(error))
         finally:
             if not result[0]:
-                self._quarantine_unresolved_lower_action(result[1])
+                self._quarantine_and_escalate(result[1])
             with self._lock:
                 self._lower_cancellation_result = result
                 self._lower_cancellation_in_progress = False
@@ -738,7 +744,12 @@ class TaskExecutive(Node):
             self._quarantined_lower_goal is not None
             or self._quarantined_lower_submission is not None)
 
-    def _quarantine_unresolved_lower_action(self, reason: str) -> None:
+    def _quarantine_and_escalate(self, reason: str) -> None:
+        """Quarantine a possibly live lower action and latch emergency stop."""
+        if self._quarantine_unresolved_lower_action(reason):
+            self._publish_unresolved_lower_emergency_stop(reason)
+
+    def _quarantine_unresolved_lower_action(self, reason: str) -> bool:
         """
         Retain ownership until a terminal lower-action result is observed.
 
@@ -753,7 +764,7 @@ class TaskExecutive(Node):
             if self._has_quarantined_lower_action_locked():
                 if not self._quarantine_reason:
                     self._quarantine_reason = reason
-                return
+                return True
             goal = self._active_lower_goal
             result_future = self._active_lower_result
             submission = self._pending_lower_submission
@@ -765,7 +776,7 @@ class TaskExecutive(Node):
                     result_future.result()
                 except Exception:
                     pass
-                return
+                return False
             self._quarantine_reason = reason
             if goal is not None:
                 if result_future is None:
@@ -783,6 +794,24 @@ class TaskExecutive(Node):
                 self._on_quarantined_lower_terminal(owned_goal, done))
         if submission_to_watch is not None:
             submission_to_watch.add_done_callback(self._on_quarantined_submission)
+        return terminal_to_watch is not None or submission_to_watch is not None
+
+    def _publish_unresolved_lower_emergency_stop(self, reason: str) -> None:
+        """Request the frozen, latched safety stop before releasing task ownership."""
+        with self._lock:
+            if (not self._has_quarantined_lower_action_locked()
+                    or self._quarantine_emergency_stop_sent):
+                return
+            self._quarantine_emergency_stop_sent = True
+        request = EmergencyStopRequest()
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.request_id.uuid = list(uuid.uuid4().bytes)
+        request.source = 'buddy_task_executor'
+        request.reason_code = EmergencyStopRequest.REASON_SYSTEM_FAULT
+        request.reason = 'unresolved lower action cancellation: ' + reason
+        self._emergency_stop.publish(request)
+        self.get_logger().error(
+            'published emergency stop for unresolved lower action: ' + reason)
 
     def _release_quarantined_lower_if_terminal(self) -> bool:
         with self._lock:
@@ -800,6 +829,7 @@ class TaskExecutive(Node):
                 self._quarantined_lower_goal = None
                 self._quarantined_lower_result = None
                 self._quarantine_reason = ''
+                self._quarantine_emergency_stop_sent = False
                 return True
         return False
 
@@ -809,12 +839,14 @@ class TaskExecutive(Node):
                 self._quarantined_lower_goal = None
                 self._quarantined_lower_result = None
                 self._quarantine_reason = ''
+                self._quarantine_emergency_stop_sent = False
 
     def _clear_quarantined_submission(self, submission) -> None:
         with self._lock:
             if self._quarantined_lower_submission is submission:
                 self._quarantined_lower_submission = None
                 self._quarantine_reason = ''
+                self._quarantine_emergency_stop_sent = False
 
     def _on_quarantined_lower_terminal(self, goal, result_future) -> None:
         """Release a quarantined goal only after its terminal future resolves."""
@@ -888,16 +920,49 @@ class TaskExecutive(Node):
         with self._lock:
             event = self._active_cancel_event
             active = self._active_goal is not None
+            quarantined = self._has_quarantined_lower_action_locked()
             if active and self._shutdown_deadline is None:
                 self._shutdown_deadline = deadline
         if event is not None:
             event.set()
+        if quarantined and not active:
+            # A prior bounded task result may have returned while its lower
+            # action remained owned.  Shutdown retries its cancellation, but
+            # never treats the process as drained unless terminal ownership is
+            # observed.
+            stopped, message = self._cancel_lower_and_wait()
+            if not stopped:
+                self._report_unresolved_lower_shutdown(message)
         if not active:
             self._execution_idle.set()
 
     def shutdown_complete(self) -> bool:
-        """Report whether the active ExecuteTask callback has left its critical path."""
-        return self._execution_idle.is_set()
+        """Report only fully drained task and lower-action ownership."""
+        with self._lock:
+            quarantined = self._has_quarantined_lower_action_locked()
+        return self._execution_idle.is_set() and not quarantined
+
+    def _report_unresolved_lower_shutdown(self, reason: str | None = None) -> None:
+        """Emit explicit fail-safe evidence before bounded process teardown."""
+        with self._lock:
+            has_quarantine = self._has_quarantined_lower_action_locked()
+            lower_action_pending = (
+                self._active_lower_goal is not None
+                or self._pending_lower_submission is not None)
+            message = reason or self._quarantine_reason or (
+                'shutdown cancellation did not reach a terminal lower-action result')
+        if not has_quarantine and lower_action_pending:
+            # The bounded drain expired while cancellation was still in flight.
+            # Preserve ownership and latch safety before action clients are
+            # destroyed, rather than assuming the lower action stopped.
+            self._quarantine_and_escalate(message)
+        with self._lock:
+            if not self._has_quarantined_lower_action_locked():
+                return
+        self._publish_unresolved_lower_emergency_stop(message)
+        diagnostic = 'process shutdown with unresolved lower action: ' + message
+        self.get_logger().error(diagnostic)
+        self._publish_execution_failure(diagnostic)
 
     def shutdown_timeout_seconds(self) -> float:
         """Bound active-task draining while preserving time for executor teardown."""
@@ -1022,6 +1087,10 @@ def main(args=None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         _drain_active_task(node, executor)
     finally:
+        if not node.shutdown_complete():
+            # The outer task drain is deliberately bounded.  Do not silently
+            # destroy a client that still owns an unconfirmed lower action.
+            node._report_unresolved_lower_shutdown()
         try:
             cancelled_sources = executor.drain_submitted_callbacks(0.25)
         except (KeyboardInterrupt, ExternalShutdownException):

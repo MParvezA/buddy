@@ -12,7 +12,7 @@ only to `/buddy/motion/safe_cmd_vel` (`geometry_msgs/msg/TwistStamped`, reliable
 depth 1) and publishes Gazebo's private `/model/buddy/cmd_vel`. It exposes no
 teleop, navigation, or raw-wheel bypass input. The future physical
 `diff_drive_controller` configuration is in `buddy_description/config` and
-uses `use_stamped_vel: true`, `cmd_vel_timeout: 0.25`, and
+uses Jazzy's native `TwistStamped` command interface, `cmd_vel_timeout: 0.25`, and
 `enable_odom_tf: false`; the eventual physical hardware plugin must be wired
 to that controller with its private `~/cmd_vel` remapped only from the frozen
 safe command topic.
@@ -34,3 +34,8 @@ bash buddy_gazebo/test/headless_smoke.sh
 
 The smoke world is intentionally small and native to Harmonic. It does not
 clone or vendor the Gazebo Classic/Dashing AWS small-house world.
+
+The adapter imports the system Gazebo Python bindings supplied by Debian
+packages `python3-gz-msgs10` and `python3-gz-transport13`. They are runtime
+prerequisites for this native-Gazebo path; no matching ROS package or rosdep
+key is installed in this workspace.

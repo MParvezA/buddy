@@ -12,6 +12,10 @@ class SafeCommandAdapter(Node):
 
     def __init__(self):
         super().__init__('safe_cmd_vel_adapter')
+        # rclpy declares the standard simulation-time parameter. Keep this
+        # fallback for runtimes that do not, without redeclaring it on Jazzy.
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', False)
         self.declare_parameter('gz_topic', '/model/buddy/cmd_vel')
         self._gz_node = GzNode()
         self._publisher = self._gz_node.advertise(
@@ -23,10 +27,6 @@ class SafeCommandAdapter(Node):
     def _on_command(self, command: TwistStamped) -> None:
         message = Twist()
         message.linear.x = command.twist.linear.x
-        message.linear.y = command.twist.linear.y
-        message.linear.z = command.twist.linear.z
-        message.angular.x = command.twist.angular.x
-        message.angular.y = command.twist.angular.y
         message.angular.z = command.twist.angular.z
         self._publisher.publish(message)
 

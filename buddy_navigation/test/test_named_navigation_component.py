@@ -1,3 +1,4 @@
+from collections import deque
 import threading
 import time
 from types import SimpleNamespace
@@ -8,9 +9,14 @@ from buddy_interfaces.action import NavigateToNamedLocation
 from buddy_interfaces.msg import SafetyState
 from buddy_interfaces.srv import ResolveNamedLocation
 from buddy_navigation import named_navigation_adapter
+from buddy_navigation.executor_teardown import drain_and_stop_workers
 from buddy_navigation.named_navigation_adapter import (
+    ACTIVE_SHUTDOWN_TIMEOUT_SEC,
     DrainingMultiThreadedExecutor,
+    EXECUTOR_DRAIN_TIMEOUT_SEC,
+    LAUNCH_SIGINT_GRACE_SEC,
     NamedNavigationAdapter,
+    WORKER_JOIN_TIMEOUT_SEC,
 )
 from geometry_msgs.msg import TransformStamped
 from nav2_msgs.action import NavigateToPose
@@ -428,13 +434,14 @@ def test_shutdown_cancels_active_nav2_and_becomes_idle(monkeypatch, tmp_path):
         NavigateToNamedLocation,
         '/buddy/navigation/navigate_to_named_location',
     )
-    executor = MultiThreadedExecutor(num_threads=6)
+    executor = DrainingMultiThreadedExecutor(num_threads=6)
     for node in (adapter, dependencies, client_node):
         executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
     goal_handle = None
     result_future = None
+    shutdown_started = None
     try:
         assert client.wait_for_server(timeout_sec=2.0)
         precondition_deadline = time.monotonic() + 2.0
@@ -453,6 +460,7 @@ def test_shutdown_cancels_active_nav2_and_becomes_idle(monkeypatch, tmp_path):
         concurrent_goal = wait_future(client.send_goal_async(goal))
         assert not concurrent_goal.accepted
         assert not adapter.shutdown_complete()
+        shutdown_started = time.monotonic()
         adapter.request_shutdown()
         shutdown_deadline = time.monotonic() + adapter.shutdown_timeout_seconds()
         while (
@@ -481,11 +489,31 @@ def test_shutdown_cancels_active_nav2_and_becomes_idle(monkeypatch, tmp_path):
             wait_future(result_future)
         executor.shutdown()
         spin_thread.join(timeout=2.0)
+        executor.drain_submitted_callbacks(
+            timeout_sec=EXECUTOR_DRAIN_TIMEOUT_SEC
+        )
+        executor.shutdown_workers(
+            timeout_sec=WORKER_JOIN_TIMEOUT_SEC
+        )
         dependencies.nav2_server.destroy()
         for node in (adapter, dependencies, client_node):
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        if shutdown_started is not None:
+            assert (
+                time.monotonic() - shutdown_started
+                < LAUNCH_SIGINT_GRACE_SEC
+            )
+        assert executor._futures == []
+        assert executor._pending_tasks == {}
+        assert executor._ready_tasks == deque()
+        assert all(
+            not thread.is_alive() for thread in executor._executor._threads
+        )
+        assert adapter._action_destroyed
+        assert adapter._nav2_destroyed
+        assert list(adapter.waitables) == []
 
 
 def test_client_cancel_confirms_nav2_stop_before_reporting_cancelled(
@@ -557,6 +585,9 @@ def test_executor_drain_reaps_completed_task_outcomes():
     executor = object.__new__(DrainingMultiThreadedExecutor)
     executor._futures = [future]
     executor._sigint_gc = None
+    executor._tasks_lock = threading.Lock()
+    executor._pending_tasks = {}
+    executor._ready_tasks = deque()
 
     cancelled = executor.drain_submitted_callbacks(timeout_sec=0.1)
 
@@ -564,6 +595,70 @@ def test_executor_drain_reaps_completed_task_outcomes():
     assert cancelled == ()
     future.exception.assert_called_once_with()
     future.result.assert_called_once_with()
+
+
+def test_executor_drain_releases_all_task_registry_references():
+    future = Mock()
+    future.cancelled.return_value = False
+    future.done.return_value = True
+    future.exception.return_value = None
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._futures = [future]
+    executor._sigint_gc = None
+    executor._tasks_lock = threading.Lock()
+    executor._pending_tasks = {future: Mock()}
+    executor._ready_tasks = deque([future])
+
+    executor.drain_submitted_callbacks(timeout_sec=0.1)
+
+    assert executor._futures == []
+    assert executor._pending_tasks == {}
+    assert executor._ready_tasks == deque()
+
+
+def test_executor_drain_retains_task_when_cancel_loses_execution_race():
+    class RacingFuture:
+
+        def __init__(self):
+            self.cancel_calls = 0
+            self.result_calls = 0
+            self._running_after_cancel = False
+
+        def cancelled(self):
+            return False
+
+        def done(self):
+            if self._running_after_cancel:
+                return True
+            return False
+
+        def executing(self):
+            return self._running_after_cancel
+
+        def cancel(self):
+            self.cancel_calls += 1
+            self._running_after_cancel = True
+
+        def exception(self):
+            return None
+
+        def result(self):
+            self.result_calls += 1
+
+    future = RacingFuture()
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._futures = [future]
+    executor._sigint_gc = None
+    executor._tasks_lock = threading.Lock()
+    executor._pending_tasks = {future: Mock()}
+    executor._ready_tasks = deque()
+
+    executor.drain_submitted_callbacks(timeout_sec=0.1)
+
+    assert future.cancel_calls == 1
+    assert future.result_calls == 1
+    assert executor._futures == []
+    assert executor._pending_tasks == {}
 
 
 def test_executor_drain_surfaces_task_exception():
@@ -575,6 +670,9 @@ def test_executor_drain_surfaces_task_exception():
     executor = object.__new__(DrainingMultiThreadedExecutor)
     executor._futures = [future]
     executor._sigint_gc = None
+    executor._tasks_lock = threading.Lock()
+    executor._pending_tasks = {}
+    executor._ready_tasks = deque()
 
     with pytest.raises(RuntimeError, match='callback failed'):
         executor.drain_submitted_callbacks(timeout_sec=0.1)
@@ -588,6 +686,9 @@ def test_executor_drain_cancels_queued_callback():
     future.cancelled.return_value = False
     future.done.return_value = False
     future.executing.return_value = False
+    future.cancel.side_effect = (
+        lambda: setattr(future.cancelled, 'return_value', True)
+    )
     source = Mock(spec=[])
     executor = object.__new__(DrainingMultiThreadedExecutor)
     executor._futures = [future]
@@ -596,6 +697,7 @@ def test_executor_drain_cancels_queued_callback():
     executor._pending_tasks = {
         future: Mock(source_entity=source),
     }
+    executor._ready_tasks = deque()
 
     cancelled = executor.drain_submitted_callbacks(timeout_sec=0.1)
 
@@ -618,6 +720,7 @@ def test_executor_drain_times_out_for_unfinished_task():
     executor._pending_tasks = {
         future: Mock(source_entity=Mock()),
     }
+    executor._ready_tasks = deque()
 
     with pytest.raises(
         TimeoutError,
@@ -645,6 +748,9 @@ def test_sigint_drains_active_navigation_before_executor_shutdown():
             events.append('drain_submitted_callbacks'),
             (),
         )[1]
+    )
+    executor.shutdown_workers.side_effect = (
+        lambda timeout_sec: events.append('shutdown_workers')
     )
     executor.shutdown.side_effect = lambda: events.append('executor_shutdown')
     with (
@@ -676,10 +782,153 @@ def test_sigint_drains_active_navigation_before_executor_shutdown():
         'request_shutdown',
         'spin_once',
         'drain_submitted_callbacks',
+        'shutdown_workers',
         'executor_shutdown',
         'destroy_node',
         'rclpy_shutdown',
     ]
+
+
+def test_main_logs_drain_failure_and_continues_all_cleanup():
+    events = []
+    logger = Mock()
+    node = Mock()
+    node.shutdown_complete.return_value = True
+    node.shutdown_timeout_seconds.return_value = 0.5
+    node.get_logger.return_value = logger
+    node.request_shutdown.side_effect = lambda: events.append('request_shutdown')
+    node.destroy_node.side_effect = lambda: events.append('destroy_node')
+    executor = Mock()
+    executor.spin.side_effect = KeyboardInterrupt()
+    executor.drain_submitted_callbacks.side_effect = RuntimeError(
+        'drain failed'
+    )
+    executor.shutdown_workers.side_effect = (
+        lambda timeout_sec: events.append('shutdown_workers')
+    )
+    executor.shutdown.side_effect = lambda: events.append('executor_shutdown')
+    with (
+        patch.object(named_navigation_adapter.rclpy, 'init'),
+        patch.object(named_navigation_adapter.rclpy, 'ok', return_value=True),
+        patch.object(
+            named_navigation_adapter.rclpy,
+            'shutdown',
+            side_effect=lambda: events.append('rclpy_shutdown'),
+        ),
+        patch.object(
+            named_navigation_adapter,
+            'NamedNavigationAdapter',
+            return_value=node,
+        ),
+        patch.object(
+            named_navigation_adapter,
+            'DrainingMultiThreadedExecutor',
+            return_value=executor,
+        ),
+    ):
+        named_navigation_adapter.main()
+
+    assert events == [
+        'request_shutdown',
+        'shutdown_workers',
+        'executor_shutdown',
+        'destroy_node',
+        'rclpy_shutdown',
+    ]
+    logger.error.assert_called_once()
+    assert 'drain failed' in logger.error.call_args.args[0]
+
+
+def test_default_teardown_budget_stays_below_launch_sigint_grace():
+    adapter = object.__new__(NamedNavigationAdapter)
+    adapter.get_parameter = Mock(
+        return_value=SimpleNamespace(value=2.0)
+    )
+
+    active_budget = adapter.shutdown_timeout_seconds()
+    total_budget = active_budget + EXECUTOR_DRAIN_TIMEOUT_SEC
+    total_budget += WORKER_JOIN_TIMEOUT_SEC
+
+    assert active_budget <= ACTIVE_SHUTDOWN_TIMEOUT_SEC
+    assert total_budget < LAUNCH_SIGINT_GRACE_SEC
+
+
+def test_executor_worker_pool_is_joined_without_queued_work():
+    thread = Mock()
+    thread.name = 'worker-0'
+    thread.is_alive.return_value = False
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._sigint_gc = None
+    executor._executor = Mock()
+    executor._executor._threads = {thread}
+
+    executor.shutdown_workers(timeout_sec=0.1)
+
+    executor._executor.shutdown.assert_called_once_with(
+        wait=False,
+        cancel_futures=True,
+    )
+    thread.join.assert_called_once()
+
+
+def test_worker_shutdown_still_runs_after_callback_drain_error():
+    executor = Mock()
+    executor.drain_submitted_callbacks.side_effect = RuntimeError(
+        'callback failed'
+    )
+
+    report = drain_and_stop_workers(
+        executor,
+        drain_timeout_sec=0.1,
+        worker_timeout_sec=0.2,
+    )
+
+    executor.shutdown_workers.assert_called_once_with(0.2)
+    assert report.cancelled_sources == ()
+    assert len(report.errors) == 1
+    assert 'callback failed' in report.errors[0]
+
+
+def test_idle_adapter_teardown_releases_workers_tasks_and_waitables(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    monkeypatch.setenv('ROS_DOMAIN_ID', '174')
+    monkeypatch.setenv('ROS_AUTOMATIC_DISCOVERY_RANGE', 'LOCALHOST')
+    rclpy.init()
+    adapter = NamedNavigationAdapter()
+    executor = DrainingMultiThreadedExecutor(num_threads=2)
+    executor.add_node(adapter)
+    try:
+        executor.spin_once(timeout_sec=0.0)
+        teardown_started = time.monotonic()
+        adapter.request_shutdown()
+        executor.drain_submitted_callbacks(
+            timeout_sec=EXECUTOR_DRAIN_TIMEOUT_SEC
+        )
+        executor.shutdown_workers(
+            timeout_sec=WORKER_JOIN_TIMEOUT_SEC
+        )
+        executor.shutdown()
+        adapter.destroy_node()
+        elapsed = time.monotonic() - teardown_started
+
+        assert elapsed < LAUNCH_SIGINT_GRACE_SEC
+        assert executor._futures == []
+        assert executor._pending_tasks == {}
+        assert executor._ready_tasks == deque()
+        assert all(
+            not thread.is_alive() for thread in executor._executor._threads
+        )
+        assert adapter._action_destroyed
+        assert adapter._nav2_destroyed
+        assert list(adapter.waitables) == []
+    finally:
+        if not adapter._action_destroyed:
+            adapter.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 def test_destroy_node_destroys_owned_action_waitables_before_parent():

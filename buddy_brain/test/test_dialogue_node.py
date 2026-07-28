@@ -82,6 +82,18 @@ class _SpeechClient:
         return self._submission
 
 
+class _ReadinessClient:
+
+    def __init__(self, ready):
+        self._ready = ready
+
+    def server_is_ready(self):
+        return self._ready
+
+    def service_is_ready(self):
+        return self._ready
+
+
 class _RejectedGoal:
 
     accepted = False
@@ -345,5 +357,81 @@ def test_speech_submission_and_result_transport_failures_are_diagnostic():
     finally:
         node._speak_client = original_client
         node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_dialogue_health_waits_for_capabilities_and_action_servers():
+    rclpy.init()
+    node = DialogueNode()
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    original_execute_client = node._execute_client
+    original_speak_client = node._speak_client
+    node._diagnostics_publisher = diagnostics
+    try:
+        node._execute_client = _ReadinessClient(False)
+        node._speak_client = _ReadinessClient(False)
+        node._publish_diagnostics()
+        waiting = diagnostics.messages[-1].status[0]
+        waiting_values = {value.key: value.value for value in waiting.values}
+        assert waiting.name == "buddy_dialogue"
+        assert waiting.level == waiting.WARN
+        assert waiting.message == "waiting for dialogue dependencies"
+        assert waiting_values == {
+            "capabilities_ready": "false",
+            "capability_count": "0",
+            "task_executor_ready": "false",
+            "speech_ready": "false",
+        }
+
+        descriptor = CapabilityDescriptor()
+        descriptor.name = "report_status"
+        descriptor.available = True
+        descriptor.requires_confirmation = False
+        node._on_capabilities(_CapabilityFuture([descriptor]))
+        node._execute_client = _ReadinessClient(True)
+        node._speak_client = _ReadinessClient(True)
+        node._publish_diagnostics()
+        ready = diagnostics.messages[-1].status[0]
+        ready_values = {value.key: value.value for value in ready.values}
+        assert ready.level == ready.OK
+        assert ready.message == "bounded dialogue ready"
+        assert ready_values == {
+            "capabilities_ready": "true",
+            "capability_count": "1",
+            "task_executor_ready": "true",
+            "speech_ready": "true",
+        }
+    finally:
+        node._execute_client = original_execute_client
+        node._speak_client = original_speak_client
+        node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_capability_service_loss_revokes_cached_dialogue_authorization():
+    rclpy.init()
+    node = DialogueNode()
+    original_capabilities_client = node._capabilities_client
+    try:
+        descriptor = CapabilityDescriptor()
+        descriptor.name = "report_status"
+        descriptor.available = True
+        descriptor.requires_confirmation = False
+        node._on_capabilities(_CapabilityFuture([descriptor]))
+        assert node._capabilities_ready
+        assert node._capability_count == 1
+        assert "report_status" in node._core._capabilities
+
+        node._capabilities_client = _ReadinessClient(False)
+        node._refresh_capabilities()
+
+        assert not node._capabilities_ready
+        assert node._capability_count == 0
+        assert node._core._capabilities == {}
+    finally:
+        node._capabilities_client = original_capabilities_client
         node.destroy_node()
         rclpy.shutdown()

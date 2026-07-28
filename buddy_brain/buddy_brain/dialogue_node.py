@@ -176,15 +176,123 @@ class DialogueNode(Node):
 
     def _request_speech(self, text: str) -> None:
         if not self._speak_client.server_is_ready():
-            self.get_logger().warning("speech action is unavailable")
+            self._report_speech_result(
+                "Speech is unavailable.",
+                DiagnosticStatus.WARN,
+                detail="speech action server is unavailable",
+            )
             return
-        goal = Speak.Goal()
-        goal.request_id = _uuid_message(uuid.uuid4())
-        goal.text = text
-        goal.voice = ""
-        goal.priority = 0
-        goal.interrupt_current = False
-        self._speak_client.send_goal_async(goal)
+        try:
+            goal = Speak.Goal()
+            goal.request_id = _uuid_message(uuid.uuid4())
+            goal.text = text
+            goal.voice = ""
+            goal.priority = 0
+            goal.interrupt_current = False
+            submission = self._speak_client.send_goal_async(goal)
+            if submission is None or not callable(getattr(submission, "add_done_callback", None)):
+                self._report_speech_result(
+                    "Speech could not be started.",
+                    DiagnosticStatus.ERROR,
+                    detail="speech action returned an invalid submission future",
+                )
+                return
+            submission.add_done_callback(self._on_speak_goal)
+        except Exception as exc:
+            self._report_speech_result(
+                f"Speech request failed: {exc}",
+                DiagnosticStatus.ERROR,
+                detail="speech goal submission raised an exception",
+            )
+
+    def _on_speak_goal(self, future: Any) -> None:
+        """Observe speech goal acceptance; failures must not recurse into speech."""
+        try:
+            goal_handle = future.result()
+            handle_has_acceptance = goal_handle is not None and hasattr(goal_handle, "accepted")
+            result_method = getattr(goal_handle, "get_result_async", None)
+            handle_has_result = callable(result_method)
+            if not handle_has_acceptance or not handle_has_result:
+                self._report_speech_result(
+                    "Speech could not be started.",
+                    DiagnosticStatus.ERROR,
+                    detail="speech action returned an invalid goal handle",
+                )
+                return
+            if not goal_handle.accepted:
+                self._report_speech_result(
+                    "Speech request was rejected.",
+                    DiagnosticStatus.WARN,
+                    detail="speech goal was rejected",
+                )
+                return
+            result_future = result_method()
+            if result_future is None or not callable(
+                getattr(result_future, "add_done_callback", None)
+            ):
+                self._report_speech_result(
+                    "Speech request failed.",
+                    DiagnosticStatus.ERROR,
+                    detail="speech action returned an invalid result future",
+                )
+                return
+            result_future.add_done_callback(self._on_speak_result)
+        except Exception as exc:
+            self._report_speech_result(
+                f"Speech request failed: {exc}",
+                DiagnosticStatus.ERROR,
+                detail="speech goal submission future failed",
+            )
+
+    def _on_speak_result(self, future: Any) -> None:
+        """Require matching ROS and custom action success before considering speech done."""
+        try:
+            wrapped = future.result()
+            result = wrapped.result
+            status = wrapped.status
+            custom_outcome = result.outcome
+            transport_succeeded = status == GoalStatus.STATUS_SUCCEEDED
+            custom_succeeded = custom_outcome == Speak.Result.OUTCOME_SUCCEEDED
+            if transport_succeeded and custom_succeeded:
+                self.get_logger().debug("speech action completed")
+                return
+            transport_canceled = status == GoalStatus.STATUS_CANCELED
+            custom_canceled = custom_outcome == Speak.Result.OUTCOME_CANCELLED
+            if transport_canceled and custom_canceled:
+                self._report_speech_result(
+                    "Speech request was canceled.",
+                    DiagnosticStatus.WARN,
+                    status=status,
+                    custom_outcome=custom_outcome,
+                    detail="speech action reached the canceled terminal state",
+                )
+                return
+            if status == GoalStatus.STATUS_ABORTED:
+                message = "Speech request failed."
+                detail = "speech action reached the aborted terminal state"
+            elif status not in (
+                GoalStatus.STATUS_SUCCEEDED,
+                GoalStatus.STATUS_CANCELED,
+                GoalStatus.STATUS_ABORTED,
+            ):
+                message = "Speech request returned an unknown status."
+                detail = "speech action returned non-terminal or invalid status"
+            else:
+                message = "Speech request returned an inconsistent result."
+                detail = "speech action status and custom outcome disagreed"
+            self._report_speech_result(
+                message,
+                DiagnosticStatus.ERROR,
+                status=status,
+                custom_outcome=custom_outcome,
+                detail=detail,
+            )
+        except Exception as exc:
+            self._report_speech_result(
+                f"Speech request failed: {exc}",
+                DiagnosticStatus.ERROR,
+                detail="speech result future failed",
+            )
 
     def _execute(self, plan: ValidatedPlan) -> None:
         if not plan.user_confirmed:
@@ -395,6 +503,52 @@ class DialogueNode(Node):
         diagnostics.status = [diagnostic]
         self._diagnostics_publisher.publish(diagnostics)
         self._dispatch(self._core.handle_execution_result(outcome, user_message))
+
+    def _report_speech_result(
+        self,
+        user_message: str,
+        level: int,
+        *,
+        status: int | None = None,
+        custom_outcome: int | None = None,
+        detail: str,
+    ) -> None:
+        """Report speech failures without scheduling another speech request.
+
+        Speech is a terminal side effect of a dialogue turn.  Routing an action
+        failure through ``_dispatch`` would attempt to speak the error and can
+        create an unbounded failure loop while the voice service is unhealthy.
+        """
+        log_message = detail
+        if status is not None:
+            log_message += f"; ROS status={_goal_status_name(status)}"
+        if custom_outcome is not None:
+            log_message += f"; custom outcome={custom_outcome}"
+        if level == DiagnosticStatus.ERROR:
+            self.get_logger().error(log_message)
+        else:
+            self.get_logger().warning(log_message)
+
+        diagnostics = DiagnosticArray()
+        diagnostics.header.stamp = self.get_clock().now().to_msg()
+        diagnostic = DiagnosticStatus()
+        diagnostic.name = "buddy_dialogue/speech"
+        diagnostic.hardware_id = "buddy_brain"
+        diagnostic.level = level
+        diagnostic.message = user_message
+        diagnostic.values = [
+            KeyValue(key="detail", value=detail),
+            KeyValue(
+                key="ros_status",
+                value="" if status is None else _goal_status_name(status),
+            ),
+            KeyValue(
+                key="custom_outcome",
+                value="" if custom_outcome is None else str(custom_outcome),
+            ),
+        ]
+        diagnostics.status = [diagnostic]
+        self._diagnostics_publisher.publish(diagnostics)
 
     def _publish_diagnostics(self) -> None:
         diagnostics = DiagnosticArray()

@@ -30,10 +30,16 @@ Run headlessly after building:
 ```bash
 source install/setup.bash
 bash buddy_gazebo/test/headless_smoke.sh
+/usr/bin/python3 buddy_gazebo/test/runtime_contract_smoke.py
 ```
 
 The smoke world is intentionally small and native to Harmonic. It does not
 clone or vendor the Gazebo Classic/Dashing AWS small-house world.
+
+The runtime contract smoke automatically selects isolated `ROS_DOMAIN_ID` and
+`GZ_PARTITION` values. It verifies exact lidar, IMU, and camera frame IDs,
+advancing monotonic simulation time, `odom` / `base_link` wheel odometry, and
+the robot-state-publisher static sensor TF chain.
 
 The adapter imports the system Gazebo Python bindings supplied by Debian
 packages `python3-gz-msgs10` and `python3-gz-transport13`. They are runtime

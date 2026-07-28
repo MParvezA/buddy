@@ -1,0 +1,1 @@
+"""Buddy Gazebo launch support."""

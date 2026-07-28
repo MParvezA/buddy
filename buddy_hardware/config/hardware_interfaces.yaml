@@ -1,0 +1,20 @@
+# Physical-driver boundary. These are requirements, not a driver implementation.
+drive:
+  controller: buddy_base_controller
+  command_topic: /buddy/motion/safe_cmd_vel
+  command_type: geometry_msgs/msg/TwistStamped
+  joints: [left_wheel_joint, right_wheel_joint]
+  command_interface: velocity
+  state_interfaces: [position, velocity]
+  wheel_separation_m: 0.39
+  wheel_radius_m: 0.065
+  command_timeout_s: 0.25
+  publish_odom_tf: false
+sensors:
+  joint_states: /joint_states
+  wheel_odometry: /odom/wheel
+  lidar: /scan
+  imu: /imu/data_raw
+  camera_image: /camera/image_raw
+  camera_info: /camera/camera_info
+frames: [base_link, base_footprint, left_wheel_link, right_wheel_link, caster_link, lidar_link, imu_link, camera_link, camera_optical_frame]

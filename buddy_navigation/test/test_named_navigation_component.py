@@ -7,9 +7,13 @@ from buddy_interfaces.action import NavigateToNamedLocation
 from buddy_interfaces.msg import SafetyState
 from buddy_interfaces.srv import ResolveNamedLocation
 from buddy_navigation import named_navigation_adapter
-from buddy_navigation.named_navigation_adapter import NamedNavigationAdapter
+from buddy_navigation.named_navigation_adapter import (
+    DrainingMultiThreadedExecutor,
+    NamedNavigationAdapter,
+)
 from geometry_msgs.msg import TransformStamped
 from nav2_msgs.action import NavigateToPose
+import pytest
 import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -215,6 +219,87 @@ def test_shutdown_cancels_active_nav2_and_becomes_idle(monkeypatch, tmp_path):
             rclpy.shutdown()
 
 
+def test_executor_drain_reaps_completed_task_outcomes():
+    future = Mock()
+    future.cancelled.return_value = False
+    future.done.return_value = True
+    future.exception.return_value = None
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._futures = [future]
+    executor._sigint_gc = None
+
+    cancelled = executor.drain_submitted_callbacks(timeout_sec=0.1)
+
+    assert executor._futures == []
+    assert cancelled == ()
+    future.exception.assert_called_once_with()
+    future.result.assert_called_once_with()
+
+
+def test_executor_drain_surfaces_task_exception():
+    error = RuntimeError('callback failed')
+    future = Mock()
+    future.cancelled.return_value = False
+    future.done.return_value = True
+    future.exception.return_value = error
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._futures = [future]
+    executor._sigint_gc = None
+
+    with pytest.raises(RuntimeError, match='callback failed'):
+        executor.drain_submitted_callbacks(timeout_sec=0.1)
+
+    future.exception.assert_called_once_with()
+    future.result.assert_not_called()
+
+
+def test_executor_drain_cancels_queued_callback():
+    future = Mock()
+    future.cancelled.return_value = False
+    future.done.return_value = False
+    future.executing.return_value = False
+    source = Mock(spec=[])
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._futures = [future]
+    executor._sigint_gc = None
+    executor._tasks_lock = threading.Lock()
+    executor._pending_tasks = {
+        future: Mock(source_entity=source),
+    }
+
+    cancelled = executor.drain_submitted_callbacks(timeout_sec=0.1)
+
+    assert executor._futures == []
+    assert cancelled == ('unittest.mock.Mock',)
+    future.cancel.assert_called_once_with()
+    future.exception.assert_not_called()
+    future.result.assert_not_called()
+
+
+def test_executor_drain_times_out_for_unfinished_task():
+    future = Mock()
+    future.cancelled.return_value = False
+    future.done.return_value = False
+    future.executing.return_value = True
+    executor = object.__new__(DrainingMultiThreadedExecutor)
+    executor._futures = [future]
+    executor._sigint_gc = None
+    executor._tasks_lock = threading.Lock()
+    executor._pending_tasks = {
+        future: Mock(source_entity=Mock()),
+    }
+
+    with pytest.raises(
+        TimeoutError,
+        match='executor callbacks did not finish before shutdown',
+    ):
+        executor.drain_submitted_callbacks(timeout_sec=0.0)
+
+    assert executor._futures == [future]
+    future.exception.assert_not_called()
+    future.result.assert_not_called()
+
+
 def test_sigint_drains_active_navigation_before_executor_shutdown():
     events = []
     node = Mock()
@@ -225,6 +310,12 @@ def test_sigint_drains_active_navigation_before_executor_shutdown():
     executor = Mock()
     executor.spin.side_effect = KeyboardInterrupt()
     executor.spin_once.side_effect = lambda timeout_sec: events.append('spin_once')
+    executor.drain_submitted_callbacks.side_effect = (
+        lambda timeout_sec: (
+            events.append('drain_submitted_callbacks'),
+            (),
+        )[1]
+    )
     executor.shutdown.side_effect = lambda: events.append('executor_shutdown')
     with (
         patch.object(named_navigation_adapter.rclpy, 'init') as initialize,
@@ -241,7 +332,7 @@ def test_sigint_drains_active_navigation_before_executor_shutdown():
         ),
         patch.object(
             named_navigation_adapter,
-            'MultiThreadedExecutor',
+            'DrainingMultiThreadedExecutor',
             return_value=executor,
         ),
     ):
@@ -254,7 +345,33 @@ def test_sigint_drains_active_navigation_before_executor_shutdown():
     assert events == [
         'request_shutdown',
         'spin_once',
+        'drain_submitted_callbacks',
         'executor_shutdown',
         'destroy_node',
         'rclpy_shutdown',
     ]
+
+
+def test_destroy_node_destroys_owned_action_waitables_before_parent():
+    events = []
+    adapter = object.__new__(NamedNavigationAdapter)
+    adapter._owned_entity_lock = threading.Lock()
+    adapter._action_destroyed = False
+    adapter._nav2_destroyed = False
+    adapter._action = Mock()
+    adapter._nav2 = Mock()
+    adapter._action.destroy.side_effect = lambda: events.append('action_server')
+    adapter._nav2.destroy.side_effect = lambda: events.append('action_client')
+
+    with patch.object(
+        Node,
+        'destroy_node',
+        side_effect=lambda: events.append('node'),
+    ) as parent_destroy:
+        adapter.destroy_node()
+    adapter.destroy_owned_entities()
+
+    assert events == ['action_server', 'action_client', 'node']
+    adapter._action.destroy.assert_called_once_with()
+    adapter._nav2.destroy.assert_called_once_with()
+    parent_destroy.assert_called_once_with()

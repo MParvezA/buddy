@@ -1,0 +1,7 @@
+world_model:
+  ros__parameters:
+    use_sim_time: false
+    summary_rate_hz: 1.0
+    max_observations: 50
+    map_frame: map
+    base_frame: base_link

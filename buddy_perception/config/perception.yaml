@@ -1,0 +1,5 @@
+sensor_readiness:
+  ros__parameters:
+    use_sim_time: false
+    sensor_timeout_sec: 1.0
+    diagnostic_rate_hz: 1.0

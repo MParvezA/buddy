@@ -4,6 +4,7 @@ import threading
 import time
 import uuid
 
+from action_msgs.msg import GoalStatus
 from buddy_capabilities.catalog import (
     ERROR_CAPABILITY_UNAVAILABLE, ERROR_PRECONDITION, ERROR_TIMEOUT, schema_for,
     validate_arguments)
@@ -202,65 +203,79 @@ class TaskExecutive(Node):
         return ''
 
     def _execute(self, goal_handle):
-        plan = goal_handle.request.plan
-        result = ExecuteTask.Result()
-        self._feedback(goal_handle, ExecuteTask.Feedback.STATE_VALIDATING, 0, len(plan.steps),
-                       '', 'validating task plan')
-        failure = self._validate_runtime(plan)
-        if failure:
-            result.outcome = ExecuteTask.Result.OUTCOME_REJECTED
-            result.message = failure.message
-            if failure.step_index is not None:
-                result.step_results = [self._step_result(
-                    plan.steps[failure.step_index], TaskStepResult.OUTCOME_REJECTED,
-                    failure.code, failure.message)]
-            goal_handle.abort()
-            return result
-
         owns_active_task = False
-        with self._lock:
-            if self._active_goal is not None and not self._is_stop_only(plan):
+        plan = None
+        current_step = None
+        step_results = []
+        try:
+            plan = goal_handle.request.plan
+            result = ExecuteTask.Result()
+            self._feedback(goal_handle, ExecuteTask.Feedback.STATE_VALIDATING, 0, len(plan.steps),
+                           '', 'validating task plan')
+            failure = self._validate_runtime(plan)
+            if failure:
                 result.outcome = ExecuteTask.Result.OUTCOME_REJECTED
-                result.message = 'another task is active'
+                result.message = failure.message
+                if failure.step_index is not None:
+                    result.step_results = [self._step_result(
+                        plan.steps[failure.step_index], TaskStepResult.OUTCOME_REJECTED,
+                        failure.code, failure.message)]
                 goal_handle.abort()
                 return result
-            if self._active_goal is None:
-                self._active_goal = goal_handle
-                self._active_cancel_event = threading.Event()
-                self._execution_idle.clear()
-                self._cancellation_failure = ''
-                self._lower_cancellation_in_progress = False
-                self._lower_cancellation_complete.clear()
-                self._lower_cancellation_result = None
-                owns_active_task = True
-        if not owns_active_task:
-            stopped, message = self._request_soft_stop()
-            stop = plan.steps[0]
-            outcome = (
-                TaskStepResult.OUTCOME_SUCCEEDED if stopped else TaskStepResult.OUTCOME_FAILED)
-            result.outcome = (
-                ExecuteTask.Result.OUTCOME_SUCCEEDED
-                if stopped else ExecuteTask.Result.OUTCOME_FAILED)
-            result.step_results = [self._step_result(
-                stop, outcome, 0 if stopped else ERROR_TIMEOUT, message)]
-            result.message = message
-            if stopped:
-                goal_handle.succeed()
-            else:
-                goal_handle.abort()
-            return result
-        deadline = time.monotonic() + self.get_parameter('max_overall_timeout_seconds').value
-        step_results = []
-        had_failure = False
-        try:
+
+            with self._lock:
+                if self._active_goal is not None and not self._is_stop_only(plan):
+                    result.outcome = ExecuteTask.Result.OUTCOME_REJECTED
+                    result.message = 'another task is active'
+                    goal_handle.abort()
+                    return result
+                if self._active_goal is None:
+                    self._active_goal = goal_handle
+                    self._active_cancel_event = threading.Event()
+                    self._execution_idle.clear()
+                    self._cancellation_failure = ''
+                    self._lower_cancellation_in_progress = False
+                    self._lower_cancellation_complete.clear()
+                    self._lower_cancellation_result = None
+                    owns_active_task = True
+            if not owns_active_task:
+                stopped, message = self._request_soft_stop()
+                stop = plan.steps[0]
+                outcome = (
+                    TaskStepResult.OUTCOME_SUCCEEDED
+                    if stopped else TaskStepResult.OUTCOME_FAILED)
+                result.outcome = (
+                    ExecuteTask.Result.OUTCOME_SUCCEEDED
+                    if stopped else ExecuteTask.Result.OUTCOME_FAILED)
+                result.step_results = [self._step_result(
+                    stop, outcome, 0 if stopped else ERROR_TIMEOUT, message)]
+                result.message = message
+                if stopped:
+                    goal_handle.succeed()
+                else:
+                    goal_handle.abort()
+                return result
+
+            deadline = time.monotonic() + self.get_parameter(
+                'max_overall_timeout_seconds').value
+            had_failure = False
             for index, step in enumerate(plan.steps):
+                current_step = step
                 if self._should_cancel(goal_handle):
-                    self._cancel_lower_and_wait()
-                    result.outcome = ExecuteTask.Result.OUTCOME_CANCELLED
-                    result.message = 'task cancellation requested'
-                    if goal_handle.is_cancel_requested:
-                        goal_handle.canceled()
+                    stopped, message = self._cancel_lower_and_wait()
+                    if stopped:
+                        result.outcome = ExecuteTask.Result.OUTCOME_CANCELLED
+                        result.message = 'task cancellation requested'
+                        if goal_handle.is_cancel_requested:
+                            goal_handle.canceled()
+                        else:
+                            goal_handle.abort()
                     else:
+                        result.outcome = ExecuteTask.Result.OUTCOME_FAILED
+                        result.message = message
+                        step_results.append(self._step_result(
+                            step, TaskStepResult.OUTCOME_FAILED,
+                            ERROR_CAPABILITY_UNAVAILABLE, message))
                         goal_handle.abort()
                     break
                 if time.monotonic() >= deadline:
@@ -298,9 +313,14 @@ class TaskExecutive(Node):
                 result.message = (
                     'task completed' if not had_failure else 'task completed with failures')
                 goal_handle.succeed()
+            result.step_results = step_results
+            return result
+        except Exception as error:
+            return self._unexpected_execution_failure(
+                goal_handle, plan, current_step, step_results, error)
         finally:
-            with self._lock:
-                if owns_active_task:
+            if owns_active_task:
+                with self._lock:
                     self._active_goal = None
                     self._active_lower_goal = None
                     self._pending_lower_submission = None
@@ -309,7 +329,55 @@ class TaskExecutive(Node):
                     self._lower_cancellation_complete.clear()
                     self._lower_cancellation_result = None
                     self._execution_idle.set()
+
+    def _unexpected_execution_failure(
+            self, goal_handle, plan, current_step, step_results, error):
+        """Convert any unexpected execute-path exception into a failed task."""
+        error_text = str(error) or type(error).__name__
+        message = 'task execution failed: ' + error_text
+        with self._lock:
+            lower_action_pending = (
+                self._active_lower_goal is not None
+                or self._pending_lower_submission is not None)
+        if lower_action_pending:
+            stopped, cancellation_message = self._cancel_lower_and_wait()
+            if not stopped:
+                message += '; ' + cancellation_message
+
+        failed_step = current_step
+        if failed_step is None and plan is not None and plan.steps:
+            failed_step = plan.steps[0]
+        if failed_step is not None:
+            failed_id = list(failed_step.step_id.uuid)
+            already_recorded = False
+            for item in step_results:
+                if list(item.step_id.uuid) == failed_id:
+                    item.outcome = TaskStepResult.OUTCOME_FAILED
+                    item.error_code = ERROR_CAPABILITY_UNAVAILABLE
+                    item.message = message
+                    already_recorded = True
+                    break
+            if not already_recorded:
+                step_results.append(self._step_result(
+                    failed_step, TaskStepResult.OUTCOME_FAILED,
+                    ERROR_CAPABILITY_UNAVAILABLE, message))
+
+        result = ExecuteTask.Result()
+        result.outcome = ExecuteTask.Result.OUTCOME_FAILED
+        result.message = message
         result.step_results = step_results
+        try:
+            goal_handle.abort()
+        except Exception as abort_error:
+            self.get_logger().error(
+                'failed to mark task goal aborted after execution failure: '
+                + str(abort_error))
+        try:
+            self._publish_execution_failure(message)
+        except Exception as diagnostic_error:
+            self.get_logger().error(
+                'failed to publish task execution diagnostic: '
+                + str(diagnostic_error))
         return result
 
     def _run_step(self, goal_handle, step, index, total, deadline):
@@ -369,13 +437,23 @@ class TaskExecutive(Node):
                                          'speech cancelled')
             return self._step_result(step, TaskStepResult.OUTCOME_TIMED_OUT, ERROR_TIMEOUT,
                                      'speech action timed out')
-        if action_result.result.outcome == Speak.Result.OUTCOME_SUCCEEDED:
+        speak_result = action_result.result
+        if (action_result.status == GoalStatus.STATUS_SUCCEEDED
+                and speak_result.outcome == Speak.Result.OUTCOME_SUCCEEDED):
             return self._step_result(
-                step, TaskStepResult.OUTCOME_SUCCEEDED, 0, action_result.result.message)
-        outcome = (TaskStepResult.OUTCOME_CANCELLED if self._should_cancel(goal_handle)
-                   else TaskStepResult.OUTCOME_FAILED)
-        return self._step_result(step, outcome, ERROR_CAPABILITY_UNAVAILABLE,
-                                 action_result.result.message)
+                step, TaskStepResult.OUTCOME_SUCCEEDED, 0, speak_result.message)
+        if (action_result.status == GoalStatus.STATUS_CANCELED
+                and speak_result.outcome == Speak.Result.OUTCOME_CANCELLED
+                and self._should_cancel(goal_handle)):
+            return self._step_result(
+                step, TaskStepResult.OUTCOME_CANCELLED, 0,
+                speak_result.message or 'speech cancelled')
+        message = speak_result.message or (
+            'speech action ended with ROS status '
+            + _goal_status_name(action_result.status))
+        return self._step_result(
+            step, TaskStepResult.OUTCOME_FAILED,
+            ERROR_CAPABILITY_UNAVAILABLE, message)
 
     def _run_navigation(self, goal_handle, step, arguments, index, total, deadline):
         attempts = 1 + self.get_parameter('navigation_recovery_attempts').value
@@ -419,14 +497,23 @@ class TaskExecutive(Node):
                 return self._step_result(step, TaskStepResult.OUTCOME_TIMED_OUT, ERROR_TIMEOUT,
                                          'navigation action timed out')
             nav_result = action_result.result
-            if nav_result.outcome == NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED:
+            if (action_result.status == GoalStatus.STATUS_SUCCEEDED
+                    and nav_result.outcome
+                    == NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED):
                 return self._step_result(
                     step, TaskStepResult.OUTCOME_SUCCEEDED, 0, nav_result.message)
-            if nav_result.outcome == NavigateToNamedLocation.Result.OUTCOME_CANCELLED:
+            if (action_result.status == GoalStatus.STATUS_CANCELED
+                    and nav_result.outcome
+                    == NavigateToNamedLocation.Result.OUTCOME_CANCELLED
+                    and self._should_cancel(goal_handle)):
                 return self._step_result(
-                    step, TaskStepResult.OUTCOME_CANCELLED, 0, nav_result.message)
-            last = nav_result.message or 'navigation failed'
+                    step, TaskStepResult.OUTCOME_CANCELLED, 0,
+                    nav_result.message or 'navigation cancelled')
+            last = nav_result.message or (
+                'navigation action ended with ROS status '
+                + _goal_status_name(action_result.status))
             if nav_result.outcome in (
+                    NavigateToNamedLocation.Result.OUTCOME_CANCELLED,
                     NavigateToNamedLocation.Result.OUTCOME_SAFETY_STOP,
                     NavigateToNamedLocation.Result.OUTCOME_UNKNOWN_LOCATION,
                     NavigateToNamedLocation.Result.OUTCOME_LOCALIZATION_UNAVAILABLE):
@@ -515,12 +602,39 @@ class TaskExecutive(Node):
             time.sleep(0.01)
         if not cancellation.done():
             return False, 'lower action cancellation acknowledgement timed out'
-        if not cancellation.result().goals_canceling:
+        try:
+            cancellation_result = cancellation.result()
+        except Exception as error:
+            return False, (
+                'lower action cancellation acknowledgement failed: ' + str(error))
+        if not cancellation_result.goals_canceling:
             return False, 'lower action did not acknowledge cancellation'
         while not result_future.done() and time.monotonic() < deadline:
             time.sleep(0.01)
         if not result_future.done():
             return False, 'lower action did not reach a terminal result after cancellation'
+        try:
+            terminal = result_future.result()
+        except Exception as error:
+            return False, 'lower action result failed after cancellation: ' + str(error)
+        if terminal.status != GoalStatus.STATUS_CANCELED:
+            return False, (
+                'lower action cancellation could not be confirmed: terminal ROS status '
+                + _goal_status_name(terminal.status))
+        terminal_result = terminal.result
+        if isinstance(terminal_result, Speak.Result):
+            custom_cancelled = (
+                terminal_result.outcome == Speak.Result.OUTCOME_CANCELLED)
+        elif isinstance(terminal_result, NavigateToNamedLocation.Result):
+            custom_cancelled = (
+                terminal_result.outcome
+                == NavigateToNamedLocation.Result.OUTCOME_CANCELLED)
+        else:
+            custom_cancelled = False
+        if not custom_cancelled:
+            return False, (
+                'lower action cancellation could not be confirmed: '
+                'terminal payload was not cancelled')
         return True, 'lower action cancellation completed'
 
     def _set_pending_submission(self, submission) -> None:
@@ -613,10 +727,37 @@ class TaskExecutive(Node):
         message.status = [status]
         self._diagnostics.publish(message)
 
+    def _publish_execution_failure(self, failure_message: str) -> None:
+        with self._lock:
+            active = self._active_goal is not None
+        status = DiagnosticStatus()
+        status.name = 'buddy_task_executive'
+        status.hardware_id = 'buddy'
+        status.level = DiagnosticStatus.ERROR
+        status.message = failure_message
+        status.values = [KeyValue(key='active_task', value=str(active).lower())]
+        message = DiagnosticArray()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.status = [status]
+        self._diagnostics.publish(message)
+
 
 def _failure(code, message, step_index):
     from buddy_task_executor.validation import ValidationFailure
     return ValidationFailure(code, message, step_index)
+
+
+def _goal_status_name(status: int) -> str:
+    names = {
+        GoalStatus.STATUS_UNKNOWN: 'UNKNOWN',
+        GoalStatus.STATUS_ACCEPTED: 'ACCEPTED',
+        GoalStatus.STATUS_EXECUTING: 'EXECUTING',
+        GoalStatus.STATUS_CANCELING: 'CANCELING',
+        GoalStatus.STATUS_SUCCEEDED: 'SUCCEEDED',
+        GoalStatus.STATUS_CANCELED: 'CANCELED',
+        GoalStatus.STATUS_ABORTED: 'ABORTED',
+    }
+    return names.get(status, f'INVALID({status})')
 
 
 def _drain_active_task(node, executor) -> None:

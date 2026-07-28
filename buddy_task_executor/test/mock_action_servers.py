@@ -19,6 +19,9 @@ class MockCapabilityActionServers(Node):
         self.hold_navigation = False
         self.goal_accept_delay_seconds = 0.0
         self.accept_cancellation = True
+        self.speak_terminal_status = 'succeeded'
+        self.navigation_terminal_status = 'succeeded'
+        self.cancel_terminal_status = 'canceled'
         self._callback_group = ReentrantCallbackGroup()
         self.navigation_outcome = NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED
         self._speak_server = ActionServer(
@@ -45,9 +48,18 @@ class MockCapabilityActionServers(Node):
         while self.hold_speak and not goal_handle.is_cancel_requested:
             time.sleep(0.01)
         if goal_handle.is_cancel_requested:
+            if self.cancel_terminal_status == 'aborted':
+                goal_handle.abort()
+                return result
+            if self.cancel_terminal_status == 'succeeded':
+                goal_handle.succeed()
+                return result
             result.outcome = Speak.Result.OUTCOME_CANCELLED
             result.message = 'mock speech cancelled'
             goal_handle.canceled()
+            return result
+        if self.speak_terminal_status == 'aborted':
+            goal_handle.abort()
             return result
         result.outcome = Speak.Result.OUTCOME_SUCCEEDED
         result.message = 'mock speech complete'
@@ -60,9 +72,18 @@ class MockCapabilityActionServers(Node):
         while self.hold_navigation and not goal_handle.is_cancel_requested:
             time.sleep(0.01)
         if goal_handle.is_cancel_requested:
+            if self.cancel_terminal_status == 'aborted':
+                goal_handle.abort()
+                return result
+            if self.cancel_terminal_status == 'succeeded':
+                goal_handle.succeed()
+                return result
             result.outcome = NavigateToNamedLocation.Result.OUTCOME_CANCELLED
             result.message = 'mock navigation cancelled'
             goal_handle.canceled()
+            return result
+        if self.navigation_terminal_status == 'aborted':
+            goal_handle.abort()
             return result
         result.outcome = self.navigation_outcome
         result.message = 'mock navigation complete'

@@ -6,6 +6,7 @@
   <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
   <license>Proprietary</license>
   <buildtool_depend>ament_python</buildtool_depend>
+  <depend>action_msgs</depend>
   <depend>buddy_capabilities</depend>
   <depend>buddy_interfaces</depend>
   <depend>diagnostic_msgs</depend>

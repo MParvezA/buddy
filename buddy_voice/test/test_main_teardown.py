@@ -23,6 +23,18 @@ class _FakeNode:
         self.events.append('drain')
         return True
 
+    def shutdown_complete(self) -> bool:
+        """Report that the fake has no active action work."""
+        return True
+
+    def shutdown_timeout_seconds(self) -> float:
+        """Return a short deterministic fake shutdown bound."""
+        return 0.1
+
+    def get_logger(self) -> object:
+        """Provide the teardown error logger contract without recording errors."""
+        return type('Logger', (), {'error': lambda *_: None})()
+
     def destroy_node(self) -> None:
         """Record deterministic cleanup."""
         self.destroyed = True
@@ -51,7 +63,21 @@ class _FakeSpeakExecutor:
         """Reproduce executor termination without constructing ROS resources."""
         raise self.exception
 
-    def shutdown(self) -> None:
+    def spin_once(self, timeout_sec: float) -> None:
+        """Record a bounded cleanup spin when active work requires it."""
+        self.events.append(f'spin_once:{timeout_sec}')
+
+    def drain_submitted_callbacks(self, timeout_sec: float) -> tuple[()]:
+        """Record terminal callback outcome collection."""
+        self.events.append('drain_callbacks')
+        return ()
+
+    def shutdown_workers(self, timeout_sec: float) -> bool:
+        """Record closure of the private executor worker pool."""
+        self.events.append('shutdown_workers')
+        return True
+
+    def shutdown(self, timeout_sec: float = 0.0) -> None:
         """Record deterministic executor teardown."""
         self.shutdown_called = True
         self.events.append('shutdown')
@@ -75,7 +101,7 @@ def test_main_quietly_handles_shutdown_exceptions(
     node = _FakeNode(events)
     shutdown_calls: list[bool] = []
     monkeypatch.setattr(module, node_class_name, lambda: node)
-    monkeypatch.setattr(module.rclpy, 'init', lambda args=None: None)
+    monkeypatch.setattr(module.rclpy, 'init', lambda args=None, **_: None)
     monkeypatch.setattr(module.rclpy, 'ok', lambda: False)
     monkeypatch.setattr(module.rclpy, 'shutdown', lambda: shutdown_calls.append(True))
 
@@ -97,7 +123,8 @@ def test_main_quietly_handles_shutdown_exceptions(
         assert executor.nodes == []
         assert executor.shutdown_called
         assert node.cancelled
-        assert events == ['cancel', 'drain', 'remove', 'shutdown', 'destroy']
+        assert events == [
+            'cancel', 'drain_callbacks', 'shutdown_workers', 'remove', 'shutdown', 'destroy']
 
 
 @pytest.mark.parametrize(
@@ -113,7 +140,7 @@ def test_main_does_not_mask_runtime_exceptions(
     node = _FakeNode(events)
     shutdown_calls: list[bool] = []
     monkeypatch.setattr(module, node_class_name, lambda: node)
-    monkeypatch.setattr(module.rclpy, 'init', lambda args=None: None)
+    monkeypatch.setattr(module.rclpy, 'init', lambda args=None, **_: None)
     monkeypatch.setattr(module.rclpy, 'ok', lambda: True)
     monkeypatch.setattr(module.rclpy, 'shutdown', lambda: shutdown_calls.append(True))
 
@@ -136,7 +163,8 @@ def test_main_does_not_mask_runtime_exceptions(
         assert executor.nodes == []
         assert executor.shutdown_called
         assert node.cancelled
-        assert events == ['cancel', 'drain', 'remove', 'shutdown', 'destroy']
+        assert events == [
+            'cancel', 'drain_callbacks', 'shutdown_workers', 'remove', 'shutdown', 'destroy']
 
 
 def test_speak_shutdown_detaches_before_destroying_action_handles() -> None:
@@ -148,6 +176,7 @@ def test_speak_shutdown_detaches_before_destroying_action_handles() -> None:
 
     speak_node._shutdown_speak_node(node, executor)
 
-    assert events == ['cancel', 'drain', 'remove', 'shutdown', 'destroy']
+    assert events == [
+        'cancel', 'drain_callbacks', 'shutdown_workers', 'remove', 'shutdown', 'destroy']
     assert node.destroyed
     assert executor.shutdown_called

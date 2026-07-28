@@ -70,7 +70,14 @@ class SpeakHarness:
         """Stop the production-configured executor and all ROS resources."""
         self.server.cancel_active_speech()
         assert self.server.wait_for_active_speech()
-        self.executor.shutdown()
+        # The client can still have a queued callback after its final result;
+        # draining it is required, but its cancellation is a normal teardown
+        # outcome rather than a test failure.
+        self.executor.drain_submitted_callbacks(0.25)
+        assert self.executor.shutdown_workers(0.25)
+        self.executor.remove_node(self.server)
+        self.executor.remove_node(self.client_node)
+        self.executor.shutdown(timeout_sec=0.0)
         self.thread.shutdown(wait=True)
         self.client.destroy()
         self.client_node.destroy_node()

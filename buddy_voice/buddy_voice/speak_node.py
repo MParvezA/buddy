@@ -13,6 +13,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 
 from .providers import (
     FakeTextToSpeechProvider,
@@ -28,6 +29,96 @@ VOICE_ERROR_EMPTY_TEXT = 1000
 VOICE_ERROR_SYNTHESIS = 1001
 VOICE_ERROR_SYNTHESIS_TIMEOUT = 1002
 VOICE_ERROR_PLAYBACK_TIMEOUT = 1003
+VOICE_ACTIVE_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+VOICE_EXECUTOR_DRAIN_TIMEOUT_SECONDS = 0.25
+VOICE_WORKER_JOIN_TIMEOUT_SECONDS = 0.25
+
+
+class DrainingSpeakExecutor(MultiThreadedExecutor):
+    """Jazzy executor that retrieves callback outcomes and reaps its workers."""
+
+    def drain_submitted_callbacks(self, timeout_sec: float) -> tuple[str, ...]:
+        """Cancel queued callbacks and retrieve every terminal task outcome."""
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        cancelled_sources = []
+        first_error = None
+        while True:
+            with self._tasks_lock:
+                tasks = list(self._pending_tasks)
+                for task in self._ready_tasks:
+                    if task not in tasks:
+                        tasks.append(task)
+                for task in self._futures:
+                    if task not in tasks:
+                        tasks.append(task)
+            if not tasks:
+                if first_error is not None:
+                    raise first_error
+                return tuple(cancelled_sources)
+
+            made_progress = False
+            for task in tasks:
+                if task.cancelled():
+                    self._release_task(task)
+                    made_progress = True
+                    continue
+                if not task.done():
+                    if task.executing():
+                        continue
+                    with self._tasks_lock:
+                        task_data = self._pending_tasks.get(task)
+                    cancelled_sources.append(_task_source_name(task_data))
+                    # Keep a task registered if cancel loses a race with execution:
+                    # its terminal outcome must still be retrieved.
+                    task.cancel()
+                    if task.cancelled():
+                        self._release_task(task)
+                        made_progress = True
+                    continue
+
+                error = task.exception()
+                self._release_task(task)
+                if error is not None:
+                    if first_error is None:
+                        first_error = error
+                else:
+                    task.result()
+                made_progress = True
+
+            with self._tasks_lock:
+                registries_empty = (
+                    not self._futures
+                    and not self._pending_tasks
+                    and not self._ready_tasks
+                )
+            if registries_empty:
+                if first_error is not None:
+                    raise first_error
+                return tuple(cancelled_sources)
+            if time.monotonic() >= deadline:
+                raise TimeoutError('executor callbacks did not finish before shutdown')
+            if not made_progress:
+                time.sleep(0.01)
+
+    def _release_task(self, task: object) -> None:
+        """Drop all private Jazzy registry references after retrieving an outcome."""
+        with self._tasks_lock:
+            self._futures[:] = [future for future in self._futures if future is not task]
+            self._pending_tasks.pop(task, None)
+            self._ready_tasks = type(self._ready_tasks)(
+                future for future in self._ready_tasks if future is not task)
+
+    def shutdown_workers(self, timeout_sec: float) -> bool:
+        """Close the private non-daemon worker pool within a finite bound."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        workers = tuple(getattr(self._executor, '_threads', ()))
+        for worker in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            worker.join(remaining)
+        return all(not worker.is_alive() for worker in workers)
 
 
 class BuddySpeakNode(Node):
@@ -59,6 +150,7 @@ class BuddySpeakNode(Node):
         self._cancel_lock = Lock()
         self._active_condition = Condition(self._cancel_lock)
         self._active_speech = 0
+        self._action_server_destroyed = False
         self.diagnostics_publisher = self.create_publisher(
             DiagnosticArray, '/diagnostics', 10)
         self._action_server = ActionServer(
@@ -259,6 +351,16 @@ class BuddySpeakNode(Node):
                 self._active_condition.wait(min(0.01, remaining))
             return True
 
+    def shutdown_complete(self) -> bool:
+        """Return whether all action work and result continuations have drained."""
+        with self._active_condition:
+            return not self._active_speech and not self._has_pending_action_result()
+
+    @staticmethod
+    def shutdown_timeout_seconds() -> float:
+        """Return the bounded shutdown interval reserved for active speech."""
+        return VOICE_ACTIVE_SHUTDOWN_TIMEOUT_SECONDS
+
     def _has_pending_action_result(self) -> bool:
         """Check ActionServer's in-process result futures during orderly drain."""
         return any(
@@ -278,7 +380,9 @@ class BuddySpeakNode(Node):
         """Destroy the action server before the underlying ROS node."""
         self.cancel_active_speech()
         self.wait_for_active_speech()
-        self._action_server.destroy()
+        if not self._action_server_destroyed:
+            self._action_server.destroy()
+            self._action_server_destroyed = True
         return super().destroy_node()
 
 
@@ -296,31 +400,68 @@ def _goal_key(goal_handle: object) -> bytes:
     return bytes(goal_handle.goal_id.uuid)
 
 
-def create_speak_executor() -> MultiThreadedExecutor:
+def _task_source_name(task_data: object | None) -> str:
+    """Describe a queued callback without retaining its source entity."""
+    source = None if task_data is None else getattr(task_data, 'source_entity', None)
+    description = f'{type(source).__module__}.{type(source).__name__}'
+    topic = getattr(source, 'topic', None)
+    return f'{description}({topic})' if topic else description
+
+
+def create_speak_executor() -> DrainingSpeakExecutor:
     """Create the production executor that keeps cancel callbacks responsive."""
-    return MultiThreadedExecutor(num_threads=2)
+    return DrainingSpeakExecutor(num_threads=2)
+
+
+def _drain_active_speech(node: BuddySpeakNode, executor: DrainingSpeakExecutor) -> None:
+    """Keep spinning briefly so cooperative cancellation can publish its result."""
+    node.cancel_active_speech()
+    deadline = time.monotonic() + node.shutdown_timeout_seconds()
+    while not node.shutdown_complete() and time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if rclpy.ok():
+            executor.spin_once(timeout_sec=min(0.05, remaining))
+        else:
+            time.sleep(min(0.01, remaining))
 
 
 def _shutdown_speak_node(
         node: BuddySpeakNode | None,
-        executor: MultiThreadedExecutor | None) -> None:
-    """Drain and detach the action server before destroying its ROS handles."""
-    if node is not None:
-        node.cancel_active_speech()
-        node.wait_for_active_speech()
-    if executor is not None and node is not None:
-        # An executor retains nodes independently of its worker pool.  Detach
-        # first so no wait-set task can touch an ActionServer being destroyed.
+        executor: DrainingSpeakExecutor | None) -> None:
+    """
+    Drain callbacks and workers before destroying action waitables.
+
+    Cleanup deliberately continues after a third-party callback failure so no
+    private worker or ROS waitable outlives the process shutdown sequence.
+    """
+    if node is not None and executor is not None:
+        _drain_active_speech(node, executor)
+        try:
+            executor.drain_submitted_callbacks(VOICE_EXECUTOR_DRAIN_TIMEOUT_SECONDS)
+        except Exception as error:
+            node.get_logger().error(
+                'Speak executor callback drain failed during shutdown: '
+                f'{type(error).__name__}: {error}')
+        try:
+            if not executor.shutdown_workers(VOICE_WORKER_JOIN_TIMEOUT_SECONDS):
+                node.get_logger().error(
+                    'Speak executor workers did not stop before shutdown bound')
+        except Exception as error:
+            node.get_logger().error(
+                'Speak executor worker shutdown failed: '
+                f'{type(error).__name__}: {error}')
+        # Detach after callback/worker drain. The executor otherwise retains
+        # this ActionServer waitable after the node destroys it.
         executor.remove_node(node)
     if executor is not None:
-        executor.shutdown()
+        executor.shutdown(timeout_sec=0.0)
     if node is not None:
         node.destroy_node()
 
 
 def main(args: list[str] | None = None) -> None:
     """Run the local mock-backed Speak action server."""
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     executor = None
     try:

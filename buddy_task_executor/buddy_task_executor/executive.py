@@ -17,6 +17,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 
 
 class TaskExecutive(Node):
@@ -38,6 +39,8 @@ class TaskExecutive(Node):
         self._pending_lower_submission = None
         self._active_goal = None
         self._active_cancel_event = None
+        self._execution_idle = threading.Event()
+        self._execution_idle.set()
         self._cancellation_failure = ''
         self._lower_cancellation_in_progress = False
         self._lower_cancellation_complete = threading.Event()
@@ -156,6 +159,7 @@ class TaskExecutive(Node):
             if self._active_goal is None:
                 self._active_goal = goal_handle
                 self._active_cancel_event = threading.Event()
+                self._execution_idle.clear()
                 self._cancellation_failure = ''
                 self._lower_cancellation_in_progress = False
                 self._lower_cancellation_complete.clear()
@@ -236,6 +240,7 @@ class TaskExecutive(Node):
                     self._lower_cancellation_in_progress = False
                     self._lower_cancellation_complete.clear()
                     self._lower_cancellation_result = None
+                    self._execution_idle.set()
         result.step_results = step_results
         return result
 
@@ -473,6 +478,25 @@ class TaskExecutive(Node):
             event = self._active_cancel_event
         return goal_handle.is_cancel_requested or (event is not None and event.is_set())
 
+    def request_shutdown(self) -> None:
+        """Request normal task cancellation before ROS entities are destroyed."""
+        with self._lock:
+            event = self._active_cancel_event
+            active = self._active_goal is not None
+        if event is not None:
+            event.set()
+        if not active:
+            self._execution_idle.set()
+
+    def shutdown_complete(self) -> bool:
+        """Report whether the active ExecuteTask callback has left its critical path."""
+        return self._execution_idle.is_set()
+
+    def shutdown_timeout_seconds(self) -> float:
+        """Bound shutdown across submission and lower-action cancellation waits."""
+        cancellation_bound = self.get_parameter('cancellation_wait_seconds').value
+        return max(0.1, (2.0 * cancellation_bound) + 0.5)
+
     @staticmethod
     def _is_stop_only(plan) -> bool:
         return len(plan.steps) == 1 and plan.steps[0].capability == 'stop'
@@ -516,15 +540,26 @@ def _failure(code, message, step_index):
     return ValidationFailure(code, message, step_index)
 
 
+def _drain_active_task(node, executor) -> None:
+    node.request_shutdown()
+    deadline = time.monotonic() + node.shutdown_timeout_seconds()
+    while not node.shutdown_complete() and time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if rclpy.ok():
+            executor.spin_once(timeout_sec=min(0.05, remaining))
+        else:
+            time.sleep(min(0.01, remaining))
+
+
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = TaskExecutive()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
-        pass
+        _drain_active_task(node, executor)
     finally:
         executor.shutdown()
         node.destroy_node()

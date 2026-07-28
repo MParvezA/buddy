@@ -16,6 +16,7 @@ from buddy_navigation.named_navigation_adapter import (
     EXECUTOR_DRAIN_TIMEOUT_SEC,
     LAUNCH_SIGINT_GRACE_SEC,
     NamedNavigationAdapter,
+    OWNER_STATUS_HEARTBEAT_PERIOD_SEC,
     WORKER_JOIN_TIMEOUT_SEC,
 )
 from geometry_msgs.msg import TransformStamped
@@ -24,6 +25,7 @@ import pytest
 import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.clock import ClockType
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -207,6 +209,13 @@ def test_named_action_uses_rclpy_executor_without_asyncio(monkeypatch, tmp_path)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
     try:
+        assert (
+            adapter._owner_status_timer.clock.clock_type
+            == ClockType.STEADY_TIME
+        )
+        assert adapter._owner_status_timer.timer_period_ns == int(
+            OWNER_STATUS_HEARTBEAT_PERIOD_SEC * 1e9
+        )
         assert client.wait_for_server(timeout_sec=2.0)
         precondition_deadline = time.monotonic() + 2.0
         while time.monotonic() < precondition_deadline:
@@ -233,6 +242,21 @@ def test_named_action_uses_rclpy_executor_without_asyncio(monkeypatch, tmp_path)
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def test_owner_status_heartbeat_only_publishes_for_reserved_goal():
+    adapter = object.__new__(NamedNavigationAdapter)
+    adapter._goal_lock = threading.Lock()
+    adapter._owned_entity_lock = threading.Lock()
+    adapter._goal_reserved = False
+    adapter._action_destroyed = False
+    adapter._action = Mock()
+
+    adapter._publish_owner_status_heartbeat()
+    adapter._goal_reserved = True
+    adapter._publish_owner_status_heartbeat()
+
+    adapter._action._handle.publish_status.assert_called_once_with()
 
 
 def test_unexpected_execute_failure_aborts_with_custom_failure_result(

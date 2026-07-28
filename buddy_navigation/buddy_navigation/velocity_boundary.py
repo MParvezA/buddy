@@ -4,6 +4,7 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import TwistStamped
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -15,6 +16,8 @@ ACTION_STATUS_TOPIC = (
     '/buddy/navigation/navigate_to_named_location/_action/status'
 )
 DIAGNOSTICS_TOPIC = '/diagnostics'
+OWNER_LIVENESS_TIMEOUT_SEC = 0.5
+MAX_LIVENESS_CHECK_PERIOD_SEC = 0.05
 
 
 def motion_request_qos() -> QoSProfile:
@@ -30,8 +33,24 @@ def motion_request_qos() -> QoSProfile:
 class VelocityBoundary(Node):
     """A type/QoS boundary only; motion policy remains in safety and arbitration."""
 
-    def __init__(self) -> None:
-        super().__init__('navigation_velocity_boundary', namespace='/buddy')
+    def __init__(self, *, parameter_overrides=None) -> None:
+        super().__init__(
+            'navigation_velocity_boundary',
+            namespace='/buddy',
+            parameter_overrides=parameter_overrides,
+        )
+        self.declare_parameter(
+            'owner_liveness_timeout_sec',
+            OWNER_LIVENESS_TIMEOUT_SEC,
+        )
+        self._owner_liveness_timeout_sec = float(
+            self.get_parameter('owner_liveness_timeout_sec').value
+        )
+        if self._owner_liveness_timeout_sec <= 0.0:
+            raise ValueError('owner_liveness_timeout_sec must be positive')
+        self._action_executing = False
+        self._last_owner_evidence_ns = None
+        self._owner_liveness_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self._publisher = self.create_publisher(
             TwistStamped, NAVIGATION_REQUEST_TOPIC, motion_request_qos()
         )
@@ -66,7 +85,15 @@ class VelocityBoundary(Node):
             DiagnosticArray, DIAGNOSTICS_TOPIC, diagnostics_qos
         )
         self._count = 0
-        self._action_executing = False
+        check_period = min(
+            MAX_LIVENESS_CHECK_PERIOD_SEC,
+            self._owner_liveness_timeout_sec / 4.0,
+        )
+        self._owner_liveness_timer = self.create_timer(
+            check_period,
+            self._check_owner_liveness,
+            clock=self._owner_liveness_clock,
+        )
 
     def _forward(self, message: TwistStamped) -> None:
         if not self._action_executing:
@@ -79,16 +106,38 @@ class VelocityBoundary(Node):
             self._publish_ready()
 
     def _on_action_status(self, status_array: GoalStatusArray) -> None:
-        was_executing = self._action_executing
-        self._action_executing = any(
+        executing = any(
             status.status == GoalStatus.STATUS_EXECUTING
             for status in status_array.status_list
         )
-        if was_executing and not self._action_executing:
-            stopped = TwistStamped()
-            stopped.header.stamp = self.get_clock().now().to_msg()
-            stopped.header.frame_id = 'base_link'
-            self._publisher.publish(stopped)
+        if executing:
+            self._last_owner_evidence_ns = (
+                self._owner_liveness_clock.now().nanoseconds
+            )
+            self._action_executing = True
+        elif self._action_executing:
+            self._close_gate()
+
+    def _check_owner_liveness(self) -> None:
+        if (
+            not self._action_executing
+            or self._last_owner_evidence_ns is None
+        ):
+            return
+        elapsed_sec = (
+            self._owner_liveness_clock.now().nanoseconds
+            - self._last_owner_evidence_ns
+        ) / 1e9
+        if elapsed_sec >= self._owner_liveness_timeout_sec:
+            self._close_gate()
+
+    def _close_gate(self) -> None:
+        self._action_executing = False
+        self._last_owner_evidence_ns = None
+        stopped = TwistStamped()
+        stopped.header.stamp = self.get_clock().now().to_msg()
+        stopped.header.frame_id = 'base_link'
+        self._publisher.publish(stopped)
 
     def _publish_ready(self) -> None:
         array = DiagnosticArray()

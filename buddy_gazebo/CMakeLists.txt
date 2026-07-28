@@ -54,6 +54,10 @@ if(BUILD_TESTING)
   add_test(NAME buddy_gazebo_model
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_model.py
   )
+  add_test(NAME safe_cmd_vel_adapter_health
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_safe_cmd_vel_adapter_health.py
+  )
 endif()
 
 ament_export_targets(export_buddy_command_watchdog HAS_LIBRARY_TARGET)

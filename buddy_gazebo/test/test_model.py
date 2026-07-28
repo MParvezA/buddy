@@ -64,6 +64,9 @@ class TestModel(unittest.TestCase):
         self.assertIn(
             "self.declare_parameter('gz_topic', '/model/buddy/watchdog/input')",
             adapter)
+        self.assertIn("status.name = 'buddy_base_controller'", adapter)
+        self.assertIn("self.create_timer(diagnostic_period_sec, self._publish_diagnostics)", adapter)
+        self.assertIn('time.monotonic_ns', adapter)
         self.assertIn('message.linear.x = command.twist.linear.x', adapter)
         self.assertIn('message.angular.z = command.twist.angular.z', adapter)
         for forbidden_axis in ('message.linear.y =', 'message.linear.z =',
@@ -73,7 +76,10 @@ class TestModel(unittest.TestCase):
     def test_adapter_teardown_catches_only_normal_shutdown(self):
         adapter = (PACKAGE / 'buddy_gazebo' / 'safe_cmd_vel_adapter.py').read_text()
         tree = ast.parse(adapter)
-        handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+        main_function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        handlers = [node for node in ast.walk(main_function) if isinstance(node, ast.ExceptHandler)]
         self.assertEqual(len(handlers), 2)
         for handler in handlers:
             caught = handler.type

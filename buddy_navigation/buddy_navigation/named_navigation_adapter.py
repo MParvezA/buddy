@@ -1,6 +1,7 @@
 """Adapt Buddy named navigation goals to Nav2 NavigateToPose."""
 
 import math
+import threading
 import time
 
 from action_msgs.msg import GoalStatus
@@ -16,6 +17,7 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
@@ -40,6 +42,11 @@ class NamedNavigationAdapter(Node):
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
 
+        self._shutdown_requested = threading.Event()
+        self._execution_idle = threading.Event()
+        self._execution_idle.set()
+        self._goal_lock = threading.Lock()
+        self._goal_reserved = False
         self._group = ReentrantCallbackGroup()
         self._resolver = self.create_client(
             ResolveNamedLocation, RESOLVE_SERVICE, callback_group=self._group
@@ -85,9 +92,16 @@ class NamedNavigationAdapter(Node):
         self._safety = message
 
     def _accept_goal(self, goal_request) -> GoalResponse:
-        if not goal_request.location_name.strip():
-            return GoalResponse.REJECT
-        return GoalResponse.ACCEPT
+        with self._goal_lock:
+            if (
+                self._shutdown_requested.is_set()
+                or self._goal_reserved
+                or not goal_request.location_name.strip()
+            ):
+                return GoalResponse.REJECT
+            self._goal_reserved = True
+            self._execution_idle.clear()
+            return GoalResponse.ACCEPT
 
     def _accept_cancel(self, _goal_handle) -> CancelResponse:
         return CancelResponse.ACCEPT
@@ -111,6 +125,14 @@ class NamedNavigationAdapter(Node):
         )
 
     def _execute(self, goal_handle):
+        try:
+            return self._execute_goal(goal_handle)
+        finally:
+            with self._goal_lock:
+                self._goal_reserved = False
+                self._execution_idle.set()
+
+    def _execute_goal(self, goal_handle):
         self._latest_pose = None
         self._send_feedback(
             goal_handle,
@@ -148,6 +170,12 @@ class NamedNavigationAdapter(Node):
         )
         if decision is not None:
             return self._finish(goal_handle, decision.outcome, decision.message)
+        if self._shutdown_requested.is_set():
+            return self._finish(
+                goal_handle,
+                Outcome.FAILED,
+                'navigation stopped for adapter shutdown before planning',
+            )
         if goal_handle.is_cancel_requested:
             return self._finish(goal_handle, Outcome.CANCELLED, 'cancelled before planning')
         if not self._nav2.wait_for_server(timeout_sec=timeout):
@@ -184,9 +212,25 @@ class NamedNavigationAdapter(Node):
             )
 
         result_future = nav_handle.get_result_async()
+        if self._shutdown_requested.is_set():
+            return self._stop_delegated_goal(
+                goal_handle,
+                nav_handle,
+                result_future,
+                Outcome.FAILED,
+                'navigation stopped for adapter shutdown',
+            )
         started = time.monotonic()
         navigation_timeout = float(self.get_parameter('navigation_timeout_sec').value)
         while not result_future.done():
+            if self._shutdown_requested.is_set():
+                return self._stop_delegated_goal(
+                    goal_handle,
+                    nav_handle,
+                    result_future,
+                    Outcome.FAILED,
+                    'navigation stopped for adapter shutdown',
+                )
             if goal_handle.is_cancel_requested:
                 return self._stop_delegated_goal(
                     goal_handle,
@@ -248,6 +292,24 @@ class NamedNavigationAdapter(Node):
             f'{message}; {confirmation.message}',
         )
 
+    def request_shutdown(self) -> None:
+        """Request cancellation while the ROS context can still contact Nav2."""
+        with self._goal_lock:
+            self._shutdown_requested.set()
+            if not self._goal_reserved:
+                self._execution_idle.set()
+
+    def shutdown_complete(self) -> bool:
+        """Report whether the active Buddy action callback has finished."""
+        return self._execution_idle.is_set()
+
+    def shutdown_timeout_seconds(self) -> float:
+        """Bound submission resolution plus downstream cancellation confirmation."""
+        dependency_bound = float(
+            self.get_parameter('dependency_timeout_sec').value
+        )
+        return max(0.1, (2.0 * dependency_bound) + 0.5)
+
     @staticmethod
     def _wait_future(future, timeout_sec: float) -> bool:
         deadline = time.monotonic() + timeout_sec
@@ -308,15 +370,26 @@ class NamedNavigationAdapter(Node):
         self._diagnostics.publish(array)
 
 
+def _drain_active_navigation(node, executor) -> None:
+    node.request_shutdown()
+    deadline = time.monotonic() + node.shutdown_timeout_seconds()
+    while not node.shutdown_complete() and time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if rclpy.ok():
+            executor.spin_once(timeout_sec=min(0.05, remaining))
+        else:
+            time.sleep(min(0.01, remaining))
+
+
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = NamedNavigationAdapter()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
-        pass
+        _drain_active_navigation(node, executor)
     finally:
         try:
             executor.shutdown()

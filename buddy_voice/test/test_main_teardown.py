@@ -8,34 +8,44 @@ from rclpy.executors import ExternalShutdownException
 class _FakeNode:
     """Records whether an entry point destroyed its node."""
 
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.destroyed = False
         self.cancelled = False
+        self.events = events if events is not None else []
 
     def cancel_active_speech(self) -> None:
         """Match the Speak node's pre-shutdown cooperative cancellation hook."""
         self.cancelled = True
+        self.events.append('cancel')
 
     def wait_for_active_speech(self) -> bool:
         """Match the Speak node's bounded action-drain hook."""
+        self.events.append('drain')
         return True
 
     def destroy_node(self) -> None:
         """Record deterministic cleanup."""
         self.destroyed = True
+        self.events.append('destroy')
 
 
 class _FakeSpeakExecutor:
     """Minimal production-executor stand-in for entry-point teardown tests."""
 
-    def __init__(self, exception: BaseException) -> None:
+    def __init__(self, exception: BaseException, events: list[str] | None = None) -> None:
         self.exception = exception
         self.nodes: list[object] = []
         self.shutdown_called = False
+        self.events = events if events is not None else []
 
     def add_node(self, node: object) -> None:
         """Record the action node added by the production entry point."""
         self.nodes.append(node)
+
+    def remove_node(self, node: object) -> None:
+        """Record action-node detachment before worker shutdown."""
+        self.nodes.remove(node)
+        self.events.append('remove')
 
     def spin(self) -> None:
         """Reproduce executor termination without constructing ROS resources."""
@@ -44,6 +54,7 @@ class _FakeSpeakExecutor:
     def shutdown(self) -> None:
         """Record deterministic executor teardown."""
         self.shutdown_called = True
+        self.events.append('shutdown')
 
 
 @pytest.mark.parametrize(
@@ -60,7 +71,8 @@ def test_main_quietly_handles_shutdown_exceptions(
         node_class_name: str,
         shutdown_exception: BaseException) -> None:
     """Shutdown exceptions are quiet and never cause a second shutdown call."""
-    node = _FakeNode()
+    events: list[str] = []
+    node = _FakeNode(events)
     shutdown_calls: list[bool] = []
     monkeypatch.setattr(module, node_class_name, lambda: node)
     monkeypatch.setattr(module.rclpy, 'init', lambda args=None: None)
@@ -69,7 +81,7 @@ def test_main_quietly_handles_shutdown_exceptions(
 
     executor = None
     if module is speak_node:
-        executor = _FakeSpeakExecutor(shutdown_exception)
+        executor = _FakeSpeakExecutor(shutdown_exception, events)
         monkeypatch.setattr(module, 'create_speak_executor', lambda: executor)
     else:
         def raise_shutdown(_: object) -> None:
@@ -82,9 +94,10 @@ def test_main_quietly_handles_shutdown_exceptions(
     assert node.destroyed
     assert shutdown_calls == []
     if executor is not None:
-        assert executor.nodes == [node]
+        assert executor.nodes == []
         assert executor.shutdown_called
         assert node.cancelled
+        assert events == ['cancel', 'drain', 'remove', 'shutdown', 'destroy']
 
 
 @pytest.mark.parametrize(
@@ -96,7 +109,8 @@ def test_main_does_not_mask_runtime_exceptions(
         module: object,
         node_class_name: str) -> None:
     """Unexpected failures propagate after node and active-context cleanup."""
-    node = _FakeNode()
+    events: list[str] = []
+    node = _FakeNode(events)
     shutdown_calls: list[bool] = []
     monkeypatch.setattr(module, node_class_name, lambda: node)
     monkeypatch.setattr(module.rclpy, 'init', lambda args=None: None)
@@ -105,7 +119,7 @@ def test_main_does_not_mask_runtime_exceptions(
 
     executor = None
     if module is speak_node:
-        executor = _FakeSpeakExecutor(RuntimeError('unexpected spin failure'))
+        executor = _FakeSpeakExecutor(RuntimeError('unexpected spin failure'), events)
         monkeypatch.setattr(module, 'create_speak_executor', lambda: executor)
     else:
         def raise_runtime(_: object) -> None:
@@ -119,6 +133,21 @@ def test_main_does_not_mask_runtime_exceptions(
     assert node.destroyed
     assert shutdown_calls == [True]
     if executor is not None:
-        assert executor.nodes == [node]
+        assert executor.nodes == []
         assert executor.shutdown_called
         assert node.cancelled
+        assert events == ['cancel', 'drain', 'remove', 'shutdown', 'destroy']
+
+
+def test_speak_shutdown_detaches_before_destroying_action_handles() -> None:
+    """The SIGINT teardown order cannot leave a destroyed server in a wait set."""
+    events: list[str] = []
+    node = _FakeNode(events)
+    executor = _FakeSpeakExecutor(KeyboardInterrupt(), events)
+    executor.add_node(node)
+
+    speak_node._shutdown_speak_node(node, executor)
+
+    assert events == ['cancel', 'drain', 'remove', 'shutdown', 'destroy']
+    assert node.destroyed
+    assert executor.shutdown_called

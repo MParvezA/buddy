@@ -15,6 +15,12 @@ from test.test_package_boundary import (
 from test.test_dialogue_node import (
     test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary,
 )
+from test.test_main_teardown import (
+    test_entrypoint_static_shape_has_narrow_shutdown_handling,
+    test_external_shutdown_does_not_request_a_second_shutdown,
+    test_keyboard_interrupt_destroys_node_then_shuts_down_live_context,
+    test_ordinary_runtime_exception_is_not_swallowed,
+)
 
 
 def load_tests(loader, tests, pattern):
@@ -27,6 +33,16 @@ def load_tests(loader, tests, pattern):
             unittest.FunctionTestCase(test_dialogue_package_has_no_motion_or_controller_boundary_violation),
             unittest.FunctionTestCase(
                 test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary
+            ),
+            unittest.FunctionTestCase(
+                test_keyboard_interrupt_destroys_node_then_shuts_down_live_context
+            ),
+            unittest.FunctionTestCase(
+                test_external_shutdown_does_not_request_a_second_shutdown
+            ),
+            unittest.FunctionTestCase(test_ordinary_runtime_exception_is_not_swallowed),
+            unittest.FunctionTestCase(
+                test_entrypoint_static_shape_has_narrow_shutdown_handling
             ),
         ]
     )

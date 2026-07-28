@@ -41,6 +41,7 @@ class TaskExecutive(Node):
         self._active_cancel_event = None
         self._execution_idle = threading.Event()
         self._execution_idle.set()
+        self._owned_actions_destroyed = False
         self._cancellation_failure = ''
         self._lower_cancellation_in_progress = False
         self._lower_cancellation_complete = threading.Event()
@@ -496,6 +497,17 @@ class TaskExecutive(Node):
         """Bound shutdown across submission and lower-action cancellation waits."""
         cancellation_bound = self.get_parameter('cancellation_wait_seconds').value
         return max(0.1, (2.0 * cancellation_bound) + 0.5)
+
+    def destroy_node(self) -> None:
+        """Destroy action waitables before standard Node-owned entities."""
+        with self._lock:
+            if self._owned_actions_destroyed:
+                return
+            self._owned_actions_destroyed = True
+        self._server.destroy()
+        self._speak_client.destroy()
+        self._navigate_client.destroy()
+        super().destroy_node()
 
     @staticmethod
     def _is_stop_only(plan) -> bool:

@@ -16,6 +16,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 
@@ -43,6 +44,8 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         os.environ.setdefault('FASTDDS_BUILTIN_TRANSPORTS', 'SHM')
         rclpy.init()
         cls.executive = TaskExecutive()
+        cls.executive.set_parameters([
+            Parameter('cancellation_wait_seconds', Parameter.Type.DOUBLE, 0.3)])
         cls.mocks = MockCapabilityActionServers()
         cls.probe = Node('task_executive_component_probe')
         cls.executor = MultiThreadedExecutor(num_threads=4)
@@ -155,11 +158,27 @@ class TaskExecutiveComponentTest(unittest.TestCase):
             active_result = wait(active.get_result_async()).result
         finally:
             self.mocks.hold_speak = False
+        self.assertEqual(
+            stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED, stop_result.message)
+        self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
+
+    def test_stop_cancels_a_goal_that_was_pending_acceptance(self):
+        self.mocks.hold_speak = True
+        self.mocks.goal_accept_delay_seconds = 0.2
+        try:
+            active = self._send(self._plan('speak'))
+            time.sleep(0.05)
+            stop_result = self._result(self._plan('stop', argument_name=''))
+            active_result = wait(active.get_result_async()).result
+        finally:
+            self.mocks.hold_speak = False
+            self.mocks.goal_accept_delay_seconds = 0.0
         self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
         self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
 
-    def test_stop_waits_for_active_speech_cancellation(self):
+    def test_stop_fails_when_lower_action_rejects_cancellation(self):
         self.mocks.hold_speak = True
+        self.mocks.accept_cancellation = False
         try:
             active = self._send(self._plan('speak'))
             time.sleep(0.1)
@@ -167,8 +186,10 @@ class TaskExecutiveComponentTest(unittest.TestCase):
             active_result = wait(active.get_result_async()).result
         finally:
             self.mocks.hold_speak = False
-        self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
-        self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
+            self.mocks.accept_cancellation = True
+        self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+        self.assertEqual(stop_result.step_results[0].outcome, 4)
+        self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
 
     def test_registered_stop_awaits_navigation_cancellation(self):
         self.mocks.hold_navigation = True

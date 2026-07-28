@@ -1,0 +1,29 @@
+# Goal
+string location_name
+---
+# Result
+uint8 OUTCOME_SUCCEEDED=0
+uint8 OUTCOME_CANCELLED=1
+uint8 OUTCOME_UNKNOWN_LOCATION=2
+uint8 OUTCOME_UNREACHABLE=3
+uint8 OUTCOME_LOCALIZATION_UNAVAILABLE=4
+uint8 OUTCOME_SAFETY_STOP=5
+uint8 OUTCOME_FAILED=6
+
+uint8 outcome
+geometry_msgs/PoseStamped reached_pose
+string message
+---
+# Feedback
+uint8 STATE_RESOLVING=0
+uint8 STATE_PLANNING=1
+uint8 STATE_MOVING=2
+uint8 STATE_RECOVERING=3
+uint8 STATE_STOPPED=4
+
+uint8 state
+geometry_msgs/PoseStamped current_pose
+float32 distance_remaining
+builtin_interfaces/Duration navigation_time
+string message
+

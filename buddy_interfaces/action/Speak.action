@@ -1,0 +1,26 @@
+# Goal
+unique_identifier_msgs/UUID request_id
+string text
+string voice
+uint8 priority
+bool interrupt_current
+---
+# Result
+uint8 OUTCOME_SUCCEEDED=0
+uint8 OUTCOME_CANCELLED=1
+uint8 OUTCOME_REJECTED=2
+uint8 OUTCOME_FAILED=3
+
+uint8 outcome
+builtin_interfaces/Duration audio_duration
+string message
+---
+# Feedback
+uint8 STATE_QUEUED=0
+uint8 STATE_SYNTHESIZING=1
+uint8 STATE_SPEAKING=2
+
+uint8 state
+float32 progress
+string message
+

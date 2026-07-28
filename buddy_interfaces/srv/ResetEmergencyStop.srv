@@ -1,0 +1,11 @@
+# Software reset request. A physical emergency stop must also be physically
+# released before an implementation can return success.
+
+string source
+string reason
+bool operator_acknowledged
+---
+bool success
+buddy_interfaces/SafetyState state
+string message
+

@@ -1,0 +1,6 @@
+string name
+---
+bool found
+buddy_interfaces/NamedLocation location
+string message
+

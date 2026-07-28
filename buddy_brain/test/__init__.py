@@ -13,6 +13,9 @@ from test.test_package_boundary import (
     test_dialogue_package_has_no_motion_or_controller_boundary_violation,
 )
 from test.test_dialogue_node import (
+    test_execute_result_requires_consistent_ros_and_custom_success,
+    test_execute_result_true_success_and_transport_exception_are_deterministic,
+    test_invalid_execute_goal_handle_is_structured_failure,
     test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary,
 )
 from test.test_main_teardown import (
@@ -33,6 +36,15 @@ def load_tests(loader, tests, pattern):
             unittest.FunctionTestCase(test_dialogue_package_has_no_motion_or_controller_boundary_violation),
             unittest.FunctionTestCase(
                 test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary
+            ),
+            unittest.FunctionTestCase(
+                test_execute_result_requires_consistent_ros_and_custom_success
+            ),
+            unittest.FunctionTestCase(
+                test_execute_result_true_success_and_transport_exception_are_deterministic
+            ),
+            unittest.FunctionTestCase(
+                test_invalid_execute_goal_handle_is_structured_failure
             ),
             unittest.FunctionTestCase(
                 test_keyboard_interrupt_destroys_node_then_shuts_down_live_context

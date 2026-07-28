@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.action import ActionClient
@@ -190,9 +191,33 @@ class DialogueNode(Node):
             self.get_logger().error("refusing unconfirmed plan")
             return
         if not self._execute_client.server_is_ready():
-            self._dispatch(self._core.handle_execution_result("failed", "Task execution is unavailable."))
+            self._report_execution_result(
+                "failed",
+                "Task execution is unavailable.",
+                DiagnosticStatus.ERROR,
+                detail="task action server is unavailable",
+            )
             return
-        self._execute_client.send_goal_async(self._to_execute_goal(plan)).add_done_callback(self._on_execute_goal)
+        try:
+            submission = self._execute_client.send_goal_async(self._to_execute_goal(plan))
+            if submission is None or not callable(
+                getattr(submission, "add_done_callback", None)
+            ):
+                self._report_execution_result(
+                    "failed",
+                    "Task execution could not be started.",
+                    DiagnosticStatus.ERROR,
+                    detail="task action returned an invalid submission future",
+                )
+                return
+            submission.add_done_callback(self._on_execute_goal)
+        except Exception as exc:
+            self._report_execution_result(
+                "failed",
+                f"Task execution failed: {exc}",
+                DiagnosticStatus.ERROR,
+                detail="task goal submission raised an exception",
+            )
 
     def _to_execute_goal(self, plan: ValidatedPlan) -> ExecuteTask.Goal:
         goal = ExecuteTask.Goal()
@@ -230,20 +255,146 @@ class DialogueNode(Node):
     def _on_execute_goal(self, future: Any) -> None:
         try:
             goal_handle = future.result()
-            if not goal_handle.accepted:
-                self._dispatch(self._core.handle_execution_result("rejected", "The task was rejected."))
+            handle_has_acceptance = (
+                goal_handle is not None and hasattr(goal_handle, "accepted")
+            )
+            result_method = getattr(goal_handle, "get_result_async", None)
+            handle_has_result = callable(result_method)
+            if not handle_has_acceptance or not handle_has_result:
+                self._report_execution_result(
+                    "failed",
+                    "Task execution could not be started.",
+                    DiagnosticStatus.ERROR,
+                    detail="task action returned an invalid goal handle",
+                )
                 return
-            goal_handle.get_result_async().add_done_callback(self._on_execute_result)
+            if not goal_handle.accepted:
+                self._report_execution_result(
+                    "rejected",
+                    "The task was rejected.",
+                    DiagnosticStatus.WARN,
+                    detail="task goal was rejected",
+                )
+                return
+            result_future = goal_handle.get_result_async()
+            if result_future is None or not callable(
+                getattr(result_future, "add_done_callback", None)
+            ):
+                self._report_execution_result(
+                    "failed",
+                    "Task execution failed.",
+                    DiagnosticStatus.ERROR,
+                    detail="task action returned an invalid result future",
+                )
+                return
+            result_future.add_done_callback(self._on_execute_result)
         except Exception as exc:
-            self._dispatch(self._core.handle_execution_result("failed", f"Task execution failed: {exc}"))
+            self._report_execution_result(
+                "failed",
+                f"Task execution failed: {exc}",
+                DiagnosticStatus.ERROR,
+                detail="task goal submission future failed",
+            )
 
     def _on_execute_result(self, future: Any) -> None:
         try:
-            result = future.result().result
-            outcome = "succeeded" if result.outcome == ExecuteTask.Result.OUTCOME_SUCCEEDED else "failed"
-            self._dispatch(self._core.handle_execution_result(outcome, result.message))
+            wrapped = future.result()
+            result = wrapped.result
+            status = wrapped.status
+            custom_outcome = result.outcome
+            transport_succeeded = status == GoalStatus.STATUS_SUCCEEDED
+            custom_succeeded = (
+                custom_outcome == ExecuteTask.Result.OUTCOME_SUCCEEDED
+            )
+            if transport_succeeded and custom_succeeded:
+                self._dispatch(
+                    self._core.handle_execution_result("succeeded", result.message)
+                )
+                return
+            transport_canceled = status == GoalStatus.STATUS_CANCELED
+            custom_canceled = (
+                custom_outcome == ExecuteTask.Result.OUTCOME_CANCELLED
+            )
+            if transport_canceled and custom_canceled:
+                self._report_execution_result(
+                    "canceled",
+                    "The task was canceled.",
+                    DiagnosticStatus.WARN,
+                    status=status,
+                    custom_outcome=custom_outcome,
+                    detail="task action reached the canceled terminal state",
+                )
+                return
+            if status == GoalStatus.STATUS_ABORTED:
+                message = "Task execution failed."
+                detail = "task action reached the aborted terminal state"
+            elif status not in (
+                GoalStatus.STATUS_SUCCEEDED,
+                GoalStatus.STATUS_CANCELED,
+                GoalStatus.STATUS_ABORTED,
+            ):
+                message = "Task execution returned an unknown status."
+                detail = "task action returned non-terminal or invalid status"
+            else:
+                message = "Task execution returned an inconsistent result."
+                detail = "task action status and custom outcome disagreed"
+            self._report_execution_result(
+                "failed",
+                message,
+                DiagnosticStatus.ERROR,
+                status=status,
+                custom_outcome=custom_outcome,
+                detail=detail,
+            )
         except Exception as exc:
-            self._dispatch(self._core.handle_execution_result("failed", f"Task execution failed: {exc}"))
+            self._report_execution_result(
+                "failed",
+                f"Task execution failed: {exc}",
+                DiagnosticStatus.ERROR,
+                detail="task result future failed",
+            )
+
+    def _report_execution_result(
+        self,
+        outcome: str,
+        user_message: str,
+        level: int,
+        *,
+        status: int | None = None,
+        custom_outcome: int | None = None,
+        detail: str,
+    ) -> None:
+        log_message = detail
+        if status is not None:
+            log_message += f"; ROS status={_goal_status_name(status)}"
+        if custom_outcome is not None:
+            log_message += f"; custom outcome={custom_outcome}"
+        if level == DiagnosticStatus.ERROR:
+            self.get_logger().error(log_message)
+        else:
+            self.get_logger().warning(log_message)
+
+        diagnostics = DiagnosticArray()
+        diagnostics.header.stamp = self.get_clock().now().to_msg()
+        diagnostic = DiagnosticStatus()
+        diagnostic.name = "buddy_dialogue/execution"
+        diagnostic.hardware_id = "buddy_brain"
+        diagnostic.level = level
+        diagnostic.message = user_message
+        diagnostic.values = [
+            KeyValue(key="detail", value=detail),
+            KeyValue(
+                key="ros_status",
+                value="" if status is None else _goal_status_name(status),
+            ),
+            KeyValue(
+                key="custom_outcome",
+                value="" if custom_outcome is None else str(custom_outcome),
+            ),
+        ]
+        diagnostics.status = [diagnostic]
+        self._diagnostics_publisher.publish(diagnostics)
+        self._dispatch(self._core.handle_execution_result(outcome, user_message))
 
     def _publish_diagnostics(self) -> None:
         diagnostics = DiagnosticArray()
@@ -256,6 +407,19 @@ class DialogueNode(Node):
         status.values = [KeyValue(key="capability_source", value="/buddy/capabilities/list")]
         diagnostics.status = [status]
         self._diagnostics_publisher.publish(diagnostics)
+
+
+def _goal_status_name(status: int) -> str:
+    names = {
+        GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
+        GoalStatus.STATUS_ACCEPTED: "ACCEPTED",
+        GoalStatus.STATUS_EXECUTING: "EXECUTING",
+        GoalStatus.STATUS_CANCELING: "CANCELING",
+        GoalStatus.STATUS_SUCCEEDED: "SUCCEEDED",
+        GoalStatus.STATUS_CANCELED: "CANCELED",
+        GoalStatus.STATUS_ABORTED: "ABORTED",
+    }
+    return names.get(status, f"INVALID({status})")
 
 
 def main(args: list[str] | None = None) -> None:

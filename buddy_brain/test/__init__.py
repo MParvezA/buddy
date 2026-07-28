@@ -17,6 +17,8 @@ from test.test_dialogue_node import (
     test_execute_result_true_success_and_transport_exception_are_deterministic,
     test_invalid_execute_goal_handle_is_structured_failure,
     test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary,
+    test_speech_action_rejection_and_terminal_outcomes_are_observed_without_recursion,
+    test_speech_submission_and_result_transport_failures_are_diagnostic,
 )
 from test.test_main_teardown import (
     test_entrypoint_static_shape_has_narrow_shutdown_handling,
@@ -45,6 +47,12 @@ def load_tests(loader, tests, pattern):
             ),
             unittest.FunctionTestCase(
                 test_invalid_execute_goal_handle_is_structured_failure
+            ),
+            unittest.FunctionTestCase(
+                test_speech_action_rejection_and_terminal_outcomes_are_observed_without_recursion
+            ),
+            unittest.FunctionTestCase(
+                test_speech_submission_and_result_transport_failures_are_diagnostic
             ),
             unittest.FunctionTestCase(
                 test_keyboard_interrupt_destroys_node_then_shuts_down_live_context

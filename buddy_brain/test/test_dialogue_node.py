@@ -13,7 +13,7 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from buddy_brain.dialogue_core import DialogueEffect, ValidatedPlan
 from buddy_brain.dialogue_node import DialogueNode
-from buddy_interfaces.action import ExecuteTask
+from buddy_interfaces.action import ExecuteTask, Speak
 from buddy_interfaces.msg import CapabilityDescriptor
 
 
@@ -52,6 +52,36 @@ class _GoalFuture:
         return self._goal_handle
 
 
+class _DoneCallbackFuture:
+
+    def __init__(self, value):
+        self._value = value
+
+    def result(self):
+        return self._value
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+class _SpeechClient:
+
+    def __init__(self, submission=None, error=None, ready=True):
+        self._submission = submission
+        self._error = error
+        self._ready = ready
+        self.goals = []
+
+    def server_is_ready(self):
+        return self._ready
+
+    def send_goal_async(self, goal):
+        self.goals.append(goal)
+        if self._error is not None:
+            raise self._error
+        return self._submission
+
+
 class _RejectedGoal:
 
     accepted = False
@@ -78,6 +108,13 @@ def _result_effect(node, status, custom_outcome, message=""):
     node._dispatch = responses.extend
     node._on_execute_result(_ResultFuture(action_result, status))
     return responses[0]
+
+
+def _speech_result(node, status, custom_outcome, message=""):
+    action_result = Speak.Result()
+    action_result.outcome = custom_outcome
+    action_result.message = message
+    node._on_speak_result(_ResultFuture(action_result, status))
 
 
 def test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary():
@@ -224,6 +261,89 @@ def test_invalid_execute_goal_handle_is_structured_failure():
         assert diagnostic.level == diagnostic.ERROR
         assert diagnostic.message == responses[0].text
     finally:
+        node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_speech_action_rejection_and_terminal_outcomes_are_observed_without_recursion():
+    rclpy.init()
+    node = DialogueNode()
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    dispatched = []
+    node._dispatch = dispatched.extend
+    try:
+        node._on_speak_goal(_GoalFuture(_RejectedGoal()))
+        rejected = diagnostics.messages[-1].status[0]
+        assert rejected.name == "buddy_dialogue/speech"
+        assert rejected.level == rejected.WARN
+        assert rejected.message == "Speech request was rejected."
+
+        _speech_result(
+            node,
+            GoalStatus.STATUS_ABORTED,
+            Speak.Result.OUTCOME_SUCCEEDED,
+            "default-success payload must not override an aborted action",
+        )
+        aborted = diagnostics.messages[-1].status[0]
+        assert aborted.level == aborted.ERROR
+        assert aborted.message == "Speech request failed."
+        assert {value.key: value.value for value in aborted.values}["ros_status"] == "ABORTED"
+
+        _speech_result(
+            node,
+            GoalStatus.STATUS_SUCCEEDED,
+            Speak.Result.OUTCOME_FAILED,
+            "custom failure",
+        )
+        custom_failure = diagnostics.messages[-1].status[0]
+        assert custom_failure.level == custom_failure.ERROR
+        assert custom_failure.message == "Speech request returned an inconsistent result."
+
+        count_before_success = len(diagnostics.messages)
+        _speech_result(
+            node,
+            GoalStatus.STATUS_SUCCEEDED,
+            Speak.Result.OUTCOME_SUCCEEDED,
+            "spoken",
+        )
+        assert len(diagnostics.messages) == count_before_success
+        assert dispatched == []
+    finally:
+        node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_speech_submission_and_result_transport_failures_are_diagnostic():
+    rclpy.init()
+    node = DialogueNode()
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    original_client = node._speak_client
+    try:
+        node._speak_client = _SpeechClient(error=RuntimeError("submission transport failed"))
+        node._request_speech("hello")
+        submission_failure = diagnostics.messages[-1].status[0]
+        assert submission_failure.level == submission_failure.ERROR
+        assert submission_failure.message == "Speech request failed: submission transport failed"
+
+        node._on_speak_result(_ResultFuture(error=RuntimeError("result transport failed")))
+        result_failure = diagnostics.messages[-1].status[0]
+        assert result_failure.level == result_failure.ERROR
+        assert result_failure.message == "Speech request failed: result transport failed"
+
+        rejected_submission = _DoneCallbackFuture(_RejectedGoal())
+        node._speak_client = _SpeechClient(submission=rejected_submission)
+        node._request_speech("hello")
+        rejected = diagnostics.messages[-1].status[0]
+        assert rejected.message == "Speech request was rejected."
+        assert node._speak_client.goals[0].text == "hello"
+    finally:
+        node._speak_client = original_client
         node._diagnostics_publisher = publisher
         node.destroy_node()
         rclpy.shutdown()

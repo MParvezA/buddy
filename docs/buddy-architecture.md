@@ -2,7 +2,7 @@
 
 ## Document status
 
-- Status: Initial architecture
+- Status: Implemented baseline for frozen contract `0.1.0`
 - Scope: Gazebo-first implementation with a future physical robot
 - Architectural priority: Deterministic safety around probabilistic AI
 

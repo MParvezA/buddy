@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>buddy_bringup</name>
+  <version>0.1.0</version>
+  <description>Root-owned full-system composition and integration validation.</description>
+  <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>buddy_brain</exec_depend>
+  <exec_depend>buddy_capabilities</exec_depend>
+  <exec_depend>buddy_gazebo</exec_depend>
+  <exec_depend>buddy_interfaces</exec_depend>
+  <exec_depend>buddy_localization</exec_depend>
+  <exec_depend>buddy_mapping</exec_depend>
+  <exec_depend>buddy_navigation</exec_depend>
+  <exec_depend>buddy_perception</exec_depend>
+  <exec_depend>buddy_safety</exec_depend>
+  <exec_depend>buddy_task_executor</exec_depend>
+  <exec_depend>buddy_voice</exec_depend>
+  <exec_depend>buddy_world_model</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>action_msgs</test_depend>
+  <test_depend>launch_testing</test_depend>
+  <test_depend>launch_testing_ros</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>tf2_ros</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

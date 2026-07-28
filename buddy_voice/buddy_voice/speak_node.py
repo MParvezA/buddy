@@ -301,6 +301,23 @@ def create_speak_executor() -> MultiThreadedExecutor:
     return MultiThreadedExecutor(num_threads=2)
 
 
+def _shutdown_speak_node(
+        node: BuddySpeakNode | None,
+        executor: MultiThreadedExecutor | None) -> None:
+    """Drain and detach the action server before destroying its ROS handles."""
+    if node is not None:
+        node.cancel_active_speech()
+        node.wait_for_active_speech()
+    if executor is not None and node is not None:
+        # An executor retains nodes independently of its worker pool.  Detach
+        # first so no wait-set task can touch an ActionServer being destroyed.
+        executor.remove_node(node)
+    if executor is not None:
+        executor.shutdown()
+    if node is not None:
+        node.destroy_node()
+
+
 def main(args: list[str] | None = None) -> None:
     """Run the local mock-backed Speak action server."""
     rclpy.init(args=args)
@@ -314,12 +331,6 @@ def main(args: list[str] | None = None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        if node is not None:
-            node.cancel_active_speech()
-            node.wait_for_active_speech()
-        if executor is not None:
-            executor.shutdown()
-        if node is not None:
-            node.destroy_node()
+        _shutdown_speak_node(node, executor)
         if rclpy.ok():
             rclpy.shutdown()

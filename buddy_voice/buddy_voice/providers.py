@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from threading import Event
+import time
 from typing import Protocol, Sequence
 
 
@@ -61,14 +63,36 @@ class SpeechToTextProvider(Protocol):
 
 
 class TextToSpeechProvider(Protocol):
-    """Synthesizes local speech; the action server owns playback and cancellation."""
+    """
+    Synthesizes local speech through a cooperative bounded call boundary.
 
-    def synthesize(self, text: str, voice: str) -> SynthesizedSpeech:
-        """Return speech audio metadata or raise ``SpeechSynthesisError``."""
+    Implementations must return, raise :class:`SpeechSynthesisCancelled`, or
+    raise :class:`SpeechSynthesisTimeout` once ``cancel_event`` is set or
+    ``deadline_monotonic`` is reached.  This deliberately keeps a slow native
+    TTS engine out of a detached worker thread: a stuck provider must not keep
+    the action server alive after cancellation or shutdown.
+    """
+
+    def synthesize(
+            self,
+            text: str,
+            voice: str,
+            *,
+            cancel_event: Event,
+            deadline_monotonic: float) -> SynthesizedSpeech:
+        """Return audio metadata or raise one of the bounded-call errors."""
 
 
 class SpeechSynthesisError(RuntimeError):
     """A provider could not synthesize the requested speech."""
+
+
+class SpeechSynthesisCancelled(SpeechSynthesisError):
+    """A cooperative provider stopped after its action was cancelled."""
+
+
+class SpeechSynthesisTimeout(SpeechSynthesisError):
+    """A cooperative provider reached the action's steady-clock deadline."""
 
 
 class PushToTalkAudioInput:
@@ -126,17 +150,47 @@ class FakeSpeechToTextProvider:
 
 
 class FakeTextToSpeechProvider:
-    """Deterministic local TTS fake with optional planned synthesis failures."""
+    """Deterministic, cooperative local TTS fake for tests and simulation."""
 
     def __init__(
-            self, duration_seconds: float = 0.06, fail_for: set[str] | None = None) -> None:
+            self,
+            duration_seconds: float = 0.06,
+            fail_for: set[str] | None = None,
+            *,
+            synthesis_delay_seconds: float = 0.0,
+            unexpected_for: set[str] | None = None) -> None:
         self.duration_seconds = duration_seconds
         self.fail_for = fail_for or set()
+        self.synthesis_delay_seconds = max(0.0, synthesis_delay_seconds)
+        self.unexpected_for = unexpected_for or set()
         self.requests: list[tuple[str, str]] = []
 
-    def synthesize(self, text: str, voice: str) -> SynthesizedSpeech:
-        """Return a fixed-duration fake audio result or a configured failure."""
+    def synthesize(
+            self,
+            text: str,
+            voice: str,
+            *,
+            cancel_event: Event,
+            deadline_monotonic: float) -> SynthesizedSpeech:
+        """Return a fixed result while observing cancellation and deadlines."""
         self.requests.append((text, voice))
+        delay_deadline = time.monotonic() + self.synthesis_delay_seconds
+        while time.monotonic() < delay_deadline:
+            if cancel_event.is_set():
+                raise SpeechSynthesisCancelled('fake TTS synthesis cancelled')
+            if time.monotonic() >= deadline_monotonic:
+                raise SpeechSynthesisTimeout('fake TTS synthesis timed out')
+            cancel_event.wait(min(
+                0.01,
+                delay_deadline - time.monotonic(),
+                max(0.0, deadline_monotonic - time.monotonic()),
+            ))
+        if cancel_event.is_set():
+            raise SpeechSynthesisCancelled('fake TTS synthesis cancelled')
+        if time.monotonic() >= deadline_monotonic:
+            raise SpeechSynthesisTimeout('fake TTS synthesis timed out')
         if text in self.fail_for:
             raise SpeechSynthesisError('fake TTS synthesis failure')
+        if text in self.unexpected_for:
+            raise RuntimeError('fake unexpected TTS provider error')
         return SynthesizedSpeech(self.duration_seconds)

@@ -4,6 +4,7 @@ import time
 
 from buddy_interfaces.action import NavigateToNamedLocation, Speak
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 
@@ -16,22 +17,27 @@ class MockCapabilityActionServers(Node):
         self.navigation_requests = []
         self.hold_speak = False
         self.hold_navigation = False
+        self.goal_accept_delay_seconds = 0.0
+        self.accept_cancellation = True
+        self._callback_group = ReentrantCallbackGroup()
         self.navigation_outcome = NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED
         self._speak_server = ActionServer(
             self, Speak, '/buddy/voice/speak', self._speak,
-            goal_callback=self._accept, cancel_callback=self._cancel)
+            goal_callback=self._accept, cancel_callback=self._cancel,
+            callback_group=self._callback_group)
         self._navigation_server = ActionServer(
             self, NavigateToNamedLocation,
             '/buddy/navigation/navigate_to_named_location', self._navigate,
-            goal_callback=self._accept, cancel_callback=self._cancel)
+            goal_callback=self._accept, cancel_callback=self._cancel,
+            callback_group=self._callback_group)
 
-    @staticmethod
-    def _accept(_request):
+    def _accept(self, _request):
+        if self.goal_accept_delay_seconds:
+            time.sleep(self.goal_accept_delay_seconds)
         return GoalResponse.ACCEPT
 
-    @staticmethod
-    def _cancel(_goal_handle):
-        return CancelResponse.ACCEPT
+    def _cancel(self, _goal_handle):
+        return CancelResponse.ACCEPT if self.accept_cancellation else CancelResponse.REJECT
 
     def _speak(self, goal_handle):
         self.speak_requests.append(goal_handle.request)

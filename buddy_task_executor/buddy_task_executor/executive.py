@@ -35,8 +35,13 @@ class TaskExecutive(Node):
         self._status = None
         self._world = None
         self._active_lower_goal = None
+        self._pending_lower_submission = None
         self._active_goal = None
         self._active_cancel_event = None
+        self._cancellation_failure = ''
+        self._lower_cancellation_in_progress = False
+        self._lower_cancellation_complete = threading.Event()
+        self._lower_cancellation_result = None
         state_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
         diagnostics_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
@@ -151,16 +156,26 @@ class TaskExecutive(Node):
             if self._active_goal is None:
                 self._active_goal = goal_handle
                 self._active_cancel_event = threading.Event()
+                self._cancellation_failure = ''
+                self._lower_cancellation_in_progress = False
+                self._lower_cancellation_complete.clear()
+                self._lower_cancellation_result = None
                 owns_active_task = True
         if not owns_active_task:
-            self._request_soft_stop()
+            stopped, message = self._request_soft_stop()
             stop = plan.steps[0]
-            result.outcome = ExecuteTask.Result.OUTCOME_SUCCEEDED
+            outcome = (
+                TaskStepResult.OUTCOME_SUCCEEDED if stopped else TaskStepResult.OUTCOME_FAILED)
+            result.outcome = (
+                ExecuteTask.Result.OUTCOME_SUCCEEDED
+                if stopped else ExecuteTask.Result.OUTCOME_FAILED)
             result.step_results = [self._step_result(
-                stop, TaskStepResult.OUTCOME_SUCCEEDED, 0,
-                'active task cancellation requested')]
-            result.message = 'active task cancellation requested'
-            goal_handle.succeed()
+                stop, outcome, 0 if stopped else ERROR_TIMEOUT, message)]
+            result.message = message
+            if stopped:
+                goal_handle.succeed()
+            else:
+                goal_handle.abort()
             return result
         deadline = time.monotonic() + self.get_parameter('max_overall_timeout_seconds').value
         step_results = []
@@ -216,7 +231,11 @@ class TaskExecutive(Node):
                 if owns_active_task:
                     self._active_goal = None
                     self._active_lower_goal = None
+                    self._pending_lower_submission = None
                     self._active_cancel_event = None
+                    self._lower_cancellation_in_progress = False
+                    self._lower_cancellation_complete.clear()
+                    self._lower_cancellation_result = None
         result.step_results = step_results
         return result
 
@@ -224,9 +243,11 @@ class TaskExecutive(Node):
         schema = schema_for(step.capability)
         arguments = validate_arguments(schema, step.arguments)
         if schema.name == 'stop':
-            self._request_soft_stop()
-            return self._step_result(step, TaskStepResult.OUTCOME_SUCCEEDED, 0,
-                                     'active motion cancellation requested')
+            stopped, message = self._request_soft_stop()
+            return self._step_result(
+                step,
+                TaskStepResult.OUTCOME_SUCCEEDED if stopped else TaskStepResult.OUTCOME_FAILED,
+                0 if stopped else ERROR_TIMEOUT, message)
         if schema.name == 'report_status':
             with self._lock:
                 status = self._status
@@ -243,8 +264,15 @@ class TaskExecutive(Node):
         request.voice = arguments.get('voice', '')
         request.priority = 0
         request.interrupt_current = False
-        goal = self._wait(self._speak_client.send_goal_async(request), deadline, goal_handle)
+        submission = self._speak_client.send_goal_async(request)
+        self._set_pending_submission(submission)
+        goal = self._wait(submission, deadline, goal_handle)
+        self._clear_pending_submission(submission)
         if goal is None:
+            cancellation_failure = self._get_cancellation_failure()
+            if cancellation_failure:
+                return self._step_result(
+                    step, TaskStepResult.OUTCOME_FAILED, ERROR_TIMEOUT, cancellation_failure)
             if self._should_cancel(goal_handle):
                 return self._step_result(step, TaskStepResult.OUTCOME_CANCELLED, 0,
                                          'speech cancelled')
@@ -259,6 +287,10 @@ class TaskExecutive(Node):
         with self._lock:
             self._active_lower_goal = None
         if action_result is None:
+            cancellation_failure = self._get_cancellation_failure()
+            if cancellation_failure:
+                return self._step_result(
+                    step, TaskStepResult.OUTCOME_FAILED, ERROR_TIMEOUT, cancellation_failure)
             if self._should_cancel(goal_handle):
                 return self._step_result(step, TaskStepResult.OUTCOME_CANCELLED, 0,
                                          'speech cancelled')
@@ -281,9 +313,15 @@ class TaskExecutive(Node):
                                step.capability, 'bounded navigation recovery')
             request = NavigateToNamedLocation.Goal()
             request.location_name = arguments['location']
-            goal = self._wait(
-                self._navigate_client.send_goal_async(request), deadline, goal_handle)
+            submission = self._navigate_client.send_goal_async(request)
+            self._set_pending_submission(submission)
+            goal = self._wait(submission, deadline, goal_handle)
+            self._clear_pending_submission(submission)
             if goal is None:
+                cancellation_failure = self._get_cancellation_failure()
+                if cancellation_failure:
+                    return self._step_result(
+                        step, TaskStepResult.OUTCOME_FAILED, ERROR_TIMEOUT, cancellation_failure)
                 if self._should_cancel(goal_handle):
                     return self._step_result(step, TaskStepResult.OUTCOME_CANCELLED, 0,
                                              'navigation cancelled')
@@ -298,6 +336,10 @@ class TaskExecutive(Node):
             with self._lock:
                 self._active_lower_goal = None
             if action_result is None:
+                cancellation_failure = self._get_cancellation_failure()
+                if cancellation_failure:
+                    return self._step_result(
+                        step, TaskStepResult.OUTCOME_FAILED, ERROR_TIMEOUT, cancellation_failure)
                 if self._should_cancel(goal_handle):
                     return self._step_result(step, TaskStepResult.OUTCOME_CANCELLED, 0,
                                              'navigation cancelled')
@@ -323,36 +365,108 @@ class TaskExecutive(Node):
     def _wait(self, future, deadline, goal_handle, action_goal=None):
         while not future.done() and time.monotonic() < deadline:
             if self._should_cancel(goal_handle):
-                if action_goal is not None:
-                    self._cancel_lower_action(action_goal, future)
+                stopped, message = self._cancel_lower_and_wait()
+                if not stopped:
+                    self._remember_cancellation_failure(message)
                 return None
             time.sleep(0.01)
         if not future.done():
-            if action_goal is not None:
-                self._cancel_lower_action(action_goal, future)
+            stopped, message = self._cancel_lower_and_wait()
+            if not stopped:
+                self._remember_cancellation_failure(message)
             return None
         return future.result()
 
-    def _request_soft_stop(self) -> None:
+    def _request_soft_stop(self) -> tuple[bool, str]:
         with self._lock:
             event = self._active_cancel_event
         if event is not None:
             event.set()
-        self._cancel_lower_and_wait()
+        stopped, message = self._cancel_lower_and_wait()
+        if not stopped:
+            self._remember_cancellation_failure(message)
+        return stopped, message
 
-    def _cancel_lower_and_wait(self) -> None:
+    def _cancel_lower_and_wait(self) -> tuple[bool, str]:
+        with self._lock:
+            if self._lower_cancellation_in_progress:
+                wait_for_existing = True
+            else:
+                wait_for_existing = False
+                self._lower_cancellation_in_progress = True
+                self._lower_cancellation_complete.clear()
+        if wait_for_existing:
+            timeout = self.get_parameter('cancellation_wait_seconds').value
+            if not self._lower_cancellation_complete.wait(timeout):
+                return False, 'lower action cancellation did not complete before bound'
+            with self._lock:
+                return self._lower_cancellation_result
+        result = (False, 'lower action cancellation raised an internal exception')
+        try:
+            result = self._cancel_lower_and_wait_once()
+        except Exception as error:  # Lower action transport failures are structured task failures.
+            result = (False, 'lower action cancellation failed: ' + str(error))
+        finally:
+            with self._lock:
+                self._lower_cancellation_result = result
+                self._lower_cancellation_in_progress = False
+                self._lower_cancellation_complete.set()
+        return result
+
+    def _cancel_lower_and_wait_once(self) -> tuple[bool, str]:
         with self._lock:
             goal = self._active_lower_goal
+            submission = self._pending_lower_submission
+        if submission is not None:
+            deadline = time.monotonic() + self.get_parameter('cancellation_wait_seconds').value
+            while not submission.done() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not submission.done():
+                return False, (
+                    'lower action goal submission did not resolve before cancellation bound')
+            goal = submission.result()
+            if not goal.accepted:
+                return True, 'lower action goal was rejected before execution'
+            with self._lock:
+                self._active_lower_goal = goal
+                if self._pending_lower_submission is submission:
+                    self._pending_lower_submission = None
         if goal is not None:
-            self._cancel_lower_action(goal, goal.get_result_async())
+            return self._cancel_lower_action(goal, goal.get_result_async())
+        return True, 'no lower action was active'
 
-    def _cancel_lower_action(self, goal, result_future) -> None:
+    def _cancel_lower_action(self, goal, result_future) -> tuple[bool, str]:
         deadline = time.monotonic() + self.get_parameter('cancellation_wait_seconds').value
         cancellation = goal.cancel_goal_async()
         while not cancellation.done() and time.monotonic() < deadline:
             time.sleep(0.01)
+        if not cancellation.done():
+            return False, 'lower action cancellation acknowledgement timed out'
+        if not cancellation.result().goals_canceling:
+            return False, 'lower action did not acknowledge cancellation'
         while not result_future.done() and time.monotonic() < deadline:
             time.sleep(0.01)
+        if not result_future.done():
+            return False, 'lower action did not reach a terminal result after cancellation'
+        return True, 'lower action cancellation completed'
+
+    def _set_pending_submission(self, submission) -> None:
+        with self._lock:
+            self._pending_lower_submission = submission
+
+    def _clear_pending_submission(self, submission) -> None:
+        with self._lock:
+            if self._pending_lower_submission is submission:
+                self._pending_lower_submission = None
+
+    def _remember_cancellation_failure(self, message: str) -> None:
+        with self._lock:
+            if not self._cancellation_failure:
+                self._cancellation_failure = message
+
+    def _get_cancellation_failure(self) -> str:
+        with self._lock:
+            return self._cancellation_failure
 
     def _should_cancel(self, goal_handle) -> bool:
         with self._lock:

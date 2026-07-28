@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "buddy_safety/command_arbiter_core.hpp"
 
@@ -34,6 +36,41 @@ double approach(const double current, const double target, const double maximum_
 bool finite_positive(const double value)
 {
   return std::isfinite(value) && value > 0.0;
+}
+
+bool has_complete_all_around_coverage(
+  std::vector<double> valid_angles,
+  const double nominal_angle_increment)
+{
+  if (valid_angles.size() < 2U) {
+    return false;
+  }
+
+  for (double & angle : valid_angles) {
+    angle = std::fmod(angle, 2.0 * kPi);
+    if (angle < 0.0) {
+      angle += 2.0 * kPi;
+    }
+  }
+  std::sort(valid_angles.begin(), valid_angles.end());
+
+  // Each valid range represents one angular cell centered on its sample. Permit
+  // only floating-point/driver rounding beyond one nominal cell. Capping the
+  // tolerance at a quarter-cell ensures that one missing sample (a two-cell
+  // gap) can never be mistaken for complete coverage.
+  const double angular_tolerance = std::min(
+    0.25 * nominal_angle_increment,
+    std::max(1.0e-6, 1.0e-3 * nominal_angle_increment));
+  const double maximum_permitted_gap = nominal_angle_increment + angular_tolerance;
+
+  for (std::size_t index = 1U; index < valid_angles.size(); ++index) {
+    if (valid_angles[index] - valid_angles[index - 1U] > maximum_permitted_gap) {
+      return false;
+    }
+  }
+  const double wraparound_gap =
+    valid_angles.front() + 2.0 * kPi - valid_angles.back();
+  return wraparound_gap <= maximum_permitted_gap;
 }
 
 }  // namespace
@@ -158,6 +195,8 @@ bool SafetyCore::submit_scan(
   const double rear_half_arc = config_.obstacle_rear_arc_radians / 2.0;
   bool front_sample_seen = false;
   bool rear_sample_seen = false;
+  std::vector<double> valid_sample_angles;
+  valid_sample_angles.reserve(scan.ranges.size());
   for (std::size_t index = 0; index < scan.ranges.size(); ++index) {
     const double angle = static_cast<double>(scan.angle_min) +
       static_cast<double>(index) * static_cast<double>(scan.angle_increment);
@@ -174,6 +213,7 @@ bool SafetyCore::submit_scan(
     if (!clear_sample && !obstacle_sample) {
       continue;
     }
+    valid_sample_angles.push_back(normalized_angle);
 
     if (obstacle_sample) {
       nearest_obstacle_all_around_ = std::min(nearest_obstacle_all_around_, range);
@@ -195,6 +235,18 @@ bool SafetyCore::submit_scan(
   if (!front_sample_seen || !rear_sample_seen) {
     if (rejection_reason != nullptr) {
       *rejection_reason = "scan has insufficient valid front or rear arc coverage";
+    }
+    return false;
+  }
+  // The frozen safety contract has one required scan-health state for the
+  // entire filter. Therefore a partial-FOV or angularly incomplete scan fails
+  // closed for all motion instead of silently authorizing translation while
+  // rotation remains unobserved.
+  if (!has_complete_all_around_coverage(
+      std::move(valid_sample_angles), static_cast<double>(scan.angle_increment)))
+  {
+    if (rejection_reason != nullptr) {
+      *rejection_reason = "scan has incomplete valid all-around angular coverage";
     }
     return false;
   }

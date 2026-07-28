@@ -1,5 +1,6 @@
 """Bounded ROS action execution through only frozen capability interfaces."""
 
+import math
 import threading
 import time
 import uuid
@@ -117,18 +118,27 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
 class TaskExecutive(Node):
     """Validate plans first, then execute their registered capabilities in order."""
 
-    def __init__(self):
-        super().__init__('task_executive', namespace='/buddy')
+    def __init__(self, *, parameter_overrides=None):
+        super().__init__(
+            'task_executive', namespace='/buddy', parameter_overrides=parameter_overrides)
         # ROS 2 declares use_sim_time automatically; accepting that standard
         # parameter keeps this node simulation-time compatible.
         self.declare_parameter('max_step_timeout_seconds', 120.0)
         self.declare_parameter('max_overall_timeout_seconds', 300.0)
         self.declare_parameter('navigation_recovery_attempts', 1)
         self.declare_parameter('cancellation_wait_seconds', 2.0)
+        # Status and semantic-world authorization is wall-clock liveness, not
+        # simulation behavior: a paused /clock must not preserve permission to
+        # start a side-effecting task indefinitely.  A one-second lease is
+        # deliberately generous for the expected 10 Hz publishers.
+        self.declare_parameter('summary_freshness_seconds', 1.0)
+        self._summary_freshness_seconds()
         self._lock = threading.Lock()
         self._callback_group = ReentrantCallbackGroup()
         self._status = None
         self._world = None
+        self._status_received_monotonic = None
+        self._world_received_monotonic = None
         self._active_lower_goal = None
         self._active_lower_result = None
         self._pending_lower_submission = None
@@ -179,10 +189,12 @@ class TaskExecutive(Node):
     def _status_callback(self, message: RobotStatus) -> None:
         with self._lock:
             self._status = message
+            self._status_received_monotonic = time.monotonic()
 
     def _world_callback(self, message: WorldSummary) -> None:
         with self._lock:
             self._world = message
+            self._world_received_monotonic = time.monotonic()
 
     def _goal_callback(self, _goal_request):
         # Accept to return a structured ExecuteTask.Result after full validation.
@@ -218,9 +230,11 @@ class TaskExecutive(Node):
             return self._speak_client.server_is_ready(), 'speech action unavailable'
         if capability == 'navigate_to':
             return self._navigate_client.server_is_ready(), 'navigation action unavailable'
-        with self._lock:
-            status = self._status
-        return status is not None, 'robot status unavailable'
+        if capability == 'report_status':
+            with self._lock:
+                status_ready = self._status_ready_locked(time.monotonic())
+            return status_ready, 'robot status unavailable or stale'
+        return False, 'capability is unavailable'
 
     def _precondition(self, capability: str, arguments: dict[str, str]) -> str:
         if capability == 'stop' or capability == 'speak':
@@ -228,10 +242,13 @@ class TaskExecutive(Node):
         with self._lock:
             status = self._status
             world = self._world
+            now = time.monotonic()
+            status_ready = self._status_ready_locked(now)
+            world_ready = self._world_ready_locked(now)
         if capability == 'report_status':
-            return '' if status is not None else 'robot status unavailable'
-        if status is None or world is None:
-            return 'robot status or world summary unavailable'
+            return '' if status_ready else 'robot status unavailable or stale'
+        if not status_ready or not world_ready:
+            return 'robot status or world summary unavailable or stale'
         if not any(location.enabled and location.name == arguments['location']
                    for location in world.named_locations):
             return 'named location is unavailable'
@@ -243,6 +260,34 @@ class TaskExecutive(Node):
         if status.safety.state not in allowed_states or status.safety.emergency_stop_latched:
             return 'safety state prohibits motion'
         return ''
+
+    def _summary_freshness_seconds(self) -> float:
+        """Return a strictly positive steady-time lease for summarized state."""
+        return self._validate_summary_freshness_seconds(
+            self.get_parameter('summary_freshness_seconds').value)
+
+    @staticmethod
+    def _validate_summary_freshness_seconds(value) -> float:
+        """Reject unsafe summary-freshness configuration without coercion."""
+        seconds = float(value)
+        if not math.isfinite(seconds) or seconds <= 0.0:
+            raise ValueError(
+                'summary_freshness_seconds must be finite and greater than zero')
+        return seconds
+
+    def _status_ready_locked(self, now_monotonic: float) -> bool:
+        return self._summary_is_fresh(
+            self._status, self._status_received_monotonic, now_monotonic)
+
+    def _world_ready_locked(self, now_monotonic: float) -> bool:
+        return self._summary_is_fresh(
+            self._world, self._world_received_monotonic, now_monotonic)
+
+    def _summary_is_fresh(self, value, received_monotonic, now_monotonic: float) -> bool:
+        if value is None or received_monotonic is None:
+            return False
+        age = now_monotonic - received_monotonic
+        return 0.0 <= age <= self._summary_freshness_seconds()
 
     def _execute(self, goal_handle):
         owns_active_task = False
@@ -1013,16 +1058,43 @@ class TaskExecutive(Node):
             active = self._active_goal is not None
             quarantined = self._has_quarantined_lower_action_locked()
             quarantine_reason = self._quarantine_reason
+            now = time.monotonic()
+            status_ready = self._status_ready_locked(now)
+            world_ready = self._world_ready_locked(now)
+        navigation_ready = self._navigate_client.server_is_ready()
+        speech_ready = self._speak_client.server_is_ready()
+        dependencies_ready = (
+            status_ready and world_ready and navigation_ready and speech_ready)
+        accepting_tasks = dependencies_ready and not active and not quarantined
         status = DiagnosticStatus()
         status.name = 'buddy_task_executive'
         status.hardware_id = 'buddy'
-        status.level = DiagnosticStatus.ERROR if quarantined else DiagnosticStatus.OK
-        status.message = (
-            'lower action cancellation unresolved: ' + quarantine_reason
-            if quarantined else 'task executive active')
+        if quarantined:
+            status.level = DiagnosticStatus.ERROR
+            status.message = 'lower action cancellation unresolved: ' + quarantine_reason
+        elif not dependencies_ready:
+            missing = []
+            if not status_ready:
+                missing.append('status')
+            if not world_ready:
+                missing.append('world')
+            if not navigation_ready:
+                missing.append('navigation')
+            if not speech_ready:
+                missing.append('speech')
+            status.level = DiagnosticStatus.WARN
+            status.message = 'task executive not ready: ' + ', '.join(missing)
+        else:
+            status.level = DiagnosticStatus.OK
+            status.message = 'task executive ready'
         status.values = [
             KeyValue(key='active_task', value=str(active).lower()),
             KeyValue(key='lower_action_quarantined', value=str(quarantined).lower()),
+            KeyValue(key='status_ready', value=str(status_ready).lower()),
+            KeyValue(key='world_ready', value=str(world_ready).lower()),
+            KeyValue(key='navigation_ready', value=str(navigation_ready).lower()),
+            KeyValue(key='speech_ready', value=str(speech_ready).lower()),
+            KeyValue(key='accepting_tasks', value=str(accepting_tasks).lower()),
         ]
         message = DiagnosticArray()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -1033,6 +1105,14 @@ class TaskExecutive(Node):
         with self._lock:
             active = self._active_goal is not None
             quarantined = self._has_quarantined_lower_action_locked()
+            now = time.monotonic()
+            status_ready = self._status_ready_locked(now)
+            world_ready = self._world_ready_locked(now)
+        navigation_ready = self._navigate_client.server_is_ready()
+        speech_ready = self._speak_client.server_is_ready()
+        accepting_tasks = (
+            status_ready and world_ready and navigation_ready and speech_ready
+            and not active and not quarantined)
         status = DiagnosticStatus()
         status.name = 'buddy_task_executive'
         status.hardware_id = 'buddy'
@@ -1041,6 +1121,11 @@ class TaskExecutive(Node):
         status.values = [
             KeyValue(key='active_task', value=str(active).lower()),
             KeyValue(key='lower_action_quarantined', value=str(quarantined).lower()),
+            KeyValue(key='status_ready', value=str(status_ready).lower()),
+            KeyValue(key='world_ready', value=str(world_ready).lower()),
+            KeyValue(key='navigation_ready', value=str(navigation_ready).lower()),
+            KeyValue(key='speech_ready', value=str(speech_ready).lower()),
+            KeyValue(key='accepting_tasks', value=str(accepting_tasks).lower()),
         ]
         message = DiagnosticArray()
         message.header.stamp = self.get_clock().now().to_msg()

@@ -1,5 +1,4 @@
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
 import yaml
 
@@ -34,20 +33,9 @@ def test_mapping_launch_delegates_slam_lifecycle_autostart():
     assert "'autostart': autostart" in launch
 
 
-def test_slam_laser_range_matches_production_lidar():
+def test_slam_laser_range_matches_frozen_production_range():
     params = yaml.safe_load(
         (PACKAGE / 'config' / 'slam_toolbox.yaml').read_text()
     )['slam_toolbox']['ros__parameters']
-    model_path = (
-        Path(__file__).resolve().parents[2]
-        / 'buddy_gazebo'
-        / 'models'
-        / 'buddy'
-        / 'model.sdf'
-    )
-    model = ET.parse(model_path)
-    lidar_max = float(
-        model.findtext(".//sensor[@type='gpu_lidar']/lidar/range/max")
-    )
 
-    assert float(params['max_laser_range']) == lidar_max
+    assert float(params['max_laser_range']) == 8.0

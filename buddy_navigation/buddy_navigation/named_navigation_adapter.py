@@ -21,6 +21,7 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener
 
+from .action_execution import execute_with_failure_result
 from .cancellation import confirm_downstream_cancel
 from .navigation_core import check_preconditions, nav2_terminal_outcome, Outcome
 
@@ -33,7 +34,8 @@ DIAGNOSTICS_TOPIC = '/diagnostics'
 
 
 class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
-    """Jazzy multi-threaded executor with an explicit callback drain.
+    """
+    Jazzy multi-threaded executor with an explicit callback drain.
 
     Jazzy has no public API for awaiting the rclpy Tasks submitted to its
     thread pool. Its ``_futures`` list is the version-scoped registry used by
@@ -116,6 +118,10 @@ class NamedNavigationAdapter(Node):
         self._owned_entity_lock = threading.Lock()
         self._action_destroyed = False
         self._nav2_destroyed = False
+        self._delegated_goal_lock = threading.Lock()
+        self._delegated_nav_handle = None
+        self._delegated_result_future = None
+        self._delegated_cancel_timeout = 2.0
         self._group = ReentrantCallbackGroup()
         self._resolver = self.create_client(
             ResolveNamedLocation, RESOLVE_SERVICE, callback_group=self._group
@@ -195,8 +201,13 @@ class NamedNavigationAdapter(Node):
 
     def _execute(self, goal_handle):
         try:
-            return self._execute_goal(goal_handle)
+            return execute_with_failure_result(
+                self,
+                goal_handle,
+                self._execute_goal,
+            )
         finally:
+            self._clear_delegated_goal()
             with self._goal_lock:
                 self._goal_reserved = False
                 self._execution_idle.set()
@@ -209,6 +220,8 @@ class NamedNavigationAdapter(Node):
             'resolving named location',
         )
         timeout = float(self.get_parameter('dependency_timeout_sec').value)
+        with self._delegated_goal_lock:
+            self._delegated_cancel_timeout = timeout
         if not self._resolver.wait_for_service(timeout_sec=timeout):
             return self._finish(
                 goal_handle, Outcome.FAILED, 'named-location resolver is unavailable'
@@ -275,12 +288,14 @@ class NamedNavigationAdapter(Node):
                 goal_handle, Outcome.FAILED, 'Nav2 goal submission failed'
             )
         nav_handle = nav_goal_future.result()
+        self._track_delegated_goal(nav_handle, None)
         if not nav_handle.accepted:
             return self._finish(
                 goal_handle, Outcome.UNREACHABLE, 'Nav2 rejected the destination'
             )
 
         result_future = nav_handle.get_result_async()
+        self._track_delegated_goal(nav_handle, result_future)
         if self._shutdown_requested.is_set():
             return self._stop_delegated_goal(
                 goal_handle,
@@ -326,6 +341,9 @@ class NamedNavigationAdapter(Node):
                 )
             time.sleep(0.05)
 
+        result_error = result_future.exception()
+        if result_error is not None:
+            raise RuntimeError(f'Nav2 result failed: {result_error}')
         wrapped_result = result_future.result()
         decision = nav2_terminal_outcome(
             wrapped_result.status,
@@ -353,13 +371,48 @@ class NamedNavigationAdapter(Node):
             return self._finish(
                 goal_handle,
                 Outcome.FAILED,
-                f'cannot confirm safe Nav2 stop: {confirmation.message}',
+                f'safe Nav2 stop could not be confirmed: {confirmation.message}',
             )
         return self._finish(
             goal_handle,
             outcome,
             f'{message}; {confirmation.message}',
         )
+
+    def _track_delegated_goal(self, nav_handle, result_future) -> None:
+        with self._delegated_goal_lock:
+            self._delegated_nav_handle = nav_handle
+            self._delegated_result_future = result_future
+
+    def _clear_delegated_goal(self) -> None:
+        with self._delegated_goal_lock:
+            self._delegated_nav_handle = None
+            self._delegated_result_future = None
+
+    def _finish_unexpected_failure(self, goal_handle, error: Exception):
+        message = (
+            f'navigation failed unexpectedly: {type(error).__name__}: {error}'
+        )
+        with self._delegated_goal_lock:
+            nav_handle = self._delegated_nav_handle
+            result_future = self._delegated_result_future
+            cancel_timeout = self._delegated_cancel_timeout
+        if nav_handle is not None:
+            confirmation = confirm_downstream_cancel(
+                nav_handle,
+                result_future,
+                canceled_status=GoalStatus.STATUS_CANCELED,
+                timeout_sec=cancel_timeout,
+            )
+            if confirmation.confirmed:
+                message += f'; {confirmation.message}'
+            else:
+                message += (
+                    '; safe Nav2 stop could not be confirmed: '
+                    f'{confirmation.message}'
+                )
+        self.get_logger().error(message)
+        return self._finish(goal_handle, Outcome.FAILED, message)
 
     def request_shutdown(self) -> None:
         """Request cancellation while the ROS context can still contact Nav2."""

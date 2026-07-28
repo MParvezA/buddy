@@ -7,7 +7,7 @@ import time
 import unittest
 
 from buddy_capabilities.catalog import TYPE_STRING
-from buddy_interfaces.action import ExecuteTask
+from buddy_interfaces.action import ExecuteTask, NavigateToNamedLocation
 from buddy_interfaces.msg import (
     NamedLocation, RobotStatus, SafetyState, TaskArgument, TaskPlan, TaskStep,
     WorldSummary)
@@ -158,6 +158,18 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
         self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
 
+    def test_stop_waits_for_active_speech_cancellation(self):
+        self.mocks.hold_speak = True
+        try:
+            active = self._send(self._plan('speak'))
+            time.sleep(0.1)
+            stop_result = self._result(self._plan('stop', argument_name=''))
+            active_result = wait(active.get_result_async()).result
+        finally:
+            self.mocks.hold_speak = False
+        self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
+        self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
+
     def test_registered_stop_awaits_navigation_cancellation(self):
         self.mocks.hold_navigation = True
         try:
@@ -171,3 +183,17 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         self.assertEqual(stop_result.outcome, ExecuteTask.Result.OUTCOME_SUCCEEDED)
         self.assertEqual(active_result.outcome, ExecuteTask.Result.OUTCOME_CANCELLED)
         self.assertEqual(self.mocks.navigation_requests[-1].location_name, 'kitchen')
+
+    def test_terminal_navigation_failures_are_structured_without_retry(self):
+        terminal_outcomes = (
+            NavigateToNamedLocation.Result.OUTCOME_SAFETY_STOP,
+            NavigateToNamedLocation.Result.OUTCOME_UNKNOWN_LOCATION,
+            NavigateToNamedLocation.Result.OUTCOME_LOCALIZATION_UNAVAILABLE)
+        for outcome in terminal_outcomes:
+            self.mocks.navigation_outcome = outcome
+            before = len(self.mocks.navigation_requests)
+            result = self._result(self._plan('navigate_to', 'location', 'kitchen'))
+            self.assertEqual(result.outcome, ExecuteTask.Result.OUTCOME_FAILED)
+            self.assertTrue(result.step_results[0].message)
+            self.assertEqual(len(self.mocks.navigation_requests), before + 1)
+        self.mocks.navigation_outcome = NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED

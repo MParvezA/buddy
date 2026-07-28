@@ -2,14 +2,14 @@
 <sdf version="1.9">
   <model name="buddy">
     <self_collide>false</self_collide>
-    <link name="base_footprint"/>
     <link name="base_link">
       <pose>0 0 0.155 0 0 0</pose>
       <inertial><mass>8.0</mass><inertia><ixx>0.13</ixx><iyy>0.19</iyy><izz>0.27</izz></inertia></inertial>
       <visual name="body"><geometry><box><size>0.48 0.36 0.18</size></box></geometry><material><diffuse>0.08 0.32 0.65 1</diffuse></material></visual>
       <collision name="body_collision"><geometry><box><size>0.48 0.36 0.18</size></box></geometry></collision>
     </link>
-    <joint name="base_footprint_joint" type="fixed"><parent>base_footprint</parent><child>base_link</child></joint>
+    <link name="base_footprint"/>
+    <joint name="base_footprint_joint" type="fixed"><parent>base_link</parent><child>base_footprint</child></joint>
     <link name="left_wheel_link">
       <pose>0 0.195 0.065 1.57079632679 0 0</pose><inertial><mass>0.35</mass><inertia><ixx>0.00045</ixx><iyy>0.00074</iyy><izz>0.00045</izz></inertia></inertial>
       <visual name="left_wheel_visual"><geometry><cylinder><radius>0.065</radius><length>0.035</length></cylinder></geometry><material><diffuse>0.05 0.05 0.05 1</diffuse></material></visual>
@@ -48,9 +48,16 @@
       <sensor name="bumper" type="contact"><always_on>1</always_on><update_rate>50</update_rate><topic>bumper/contacts</topic><contact><collision>bumper_collision</collision></contact></sensor>
     </link>
     <joint name="bumper_joint" type="fixed"><parent>base_link</parent><child>bumper_link</child></joint>
+    <plugin filename="libbuddy_command_watchdog.so" name="buddy_gazebo::CommandWatchdog">
+      <input_topic>/model/buddy/watchdog/input</input_topic>
+      <output_topic>/model/buddy/watchdog/output</output_topic>
+      <timeout>0.25</timeout>
+      <publish_rate>50</publish_rate>
+    </plugin>
     <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
       <left_joint>left_wheel_joint</left_joint><right_joint>right_wheel_joint</right_joint>
       <wheel_separation>0.39</wheel_separation><wheel_radius>0.065</wheel_radius>
+      <topic>/model/buddy/watchdog/output</topic>
       <frame_id>odom</frame_id><child_frame_id>base_link</child_frame_id>
       <odom_publish_frequency>30</odom_publish_frequency><max_linear_velocity>0.5</max_linear_velocity><min_linear_velocity>-0.5</min_linear_velocity><max_angular_velocity>1.5</max_angular_velocity><min_angular_velocity>-1.5</min_angular_velocity><max_linear_acceleration>0.8</max_linear_acceleration><max_angular_acceleration>2.0</max_angular_acceleration>
     </plugin>

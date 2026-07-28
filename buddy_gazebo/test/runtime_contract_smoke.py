@@ -11,7 +11,12 @@ import time
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
 from tf2_msgs.msg import TFMessage
@@ -24,7 +29,7 @@ EXPECTED_SENSOR_FRAMES = {
     'camera_info': 'camera_optical_frame',
 }
 EXPECTED_STATIC_TF = {
-    ('base_footprint', 'base_link'),
+    ('base_link', 'base_footprint'),
     ('base_link', 'lidar_link'),
     ('base_link', 'imu_link'),
     ('base_link', 'camera_link'),
@@ -46,6 +51,8 @@ class ContractProbe(Node):
         self.clock_samples = []
         self.clock_regression = None
         self.static_tf = set()
+        self.dynamic_tf = set()
+        self.odom_qos = None
         self.create_subscription(LaserScan, '/scan', self._scan, sensor_qos)
         self.create_subscription(Imu, '/imu/data_raw', self._imu, sensor_qos)
         self.create_subscription(Image, '/camera/image_raw', self._image, sensor_qos)
@@ -54,6 +61,7 @@ class ContractProbe(Node):
         self.create_subscription(Odometry, '/odom/wheel', self._odom, sensor_qos)
         self.create_subscription(Clock, '/clock', self._on_clock, sensor_qos)
         self.create_subscription(TFMessage, '/tf_static', self._tf_static, transient_qos)
+        self.create_subscription(TFMessage, '/tf', self._tf_dynamic, sensor_qos)
 
     def _scan(self, message):
         self.frames['scan'] = message.header.frame_id
@@ -82,12 +90,22 @@ class ContractProbe(Node):
             for transform in message.transforms
         )
 
+    def _tf_dynamic(self, message):
+        self.dynamic_tf.update(
+            (transform.header.frame_id, transform.child_frame_id)
+            for transform in message.transforms
+        )
+
     def complete(self):
+        publisher_info = self.get_publishers_info_by_topic('/odom/wheel')
+        if publisher_info:
+            self.odom_qos = publisher_info[0].qos_profile
         return (
             set(self.frames) == set(EXPECTED_SENSOR_FRAMES)
             and self.odom_frames is not None
             and len(self.clock_samples) >= 5
             and EXPECTED_STATIC_TF <= self.static_tf
+            and self.odom_qos is not None
         )
 
     def assert_contract(self):
@@ -98,6 +116,31 @@ class ContractProbe(Node):
         if self.odom_frames != ('odom', 'base_link'):
             failures.append(
                 f'odom frames: expected (odom, base_link), got {self.odom_frames}')
+        expected_odom_qos = (
+            HistoryPolicy.KEEP_LAST,
+            10,
+            ReliabilityPolicy.BEST_EFFORT,
+            DurabilityPolicy.VOLATILE,
+        )
+        actual_odom_qos = None if self.odom_qos is None else (
+            self.odom_qos.history,
+            self.odom_qos.depth,
+            self.odom_qos.reliability,
+            self.odom_qos.durability,
+        )
+        # DDS discovery does not transmit writer history/depth on all RMW
+        # implementations. In that case they are UNKNOWN/0; the companion
+        # bridge_qos_config C++ test asserts ros_gz_bridge resolves the actual
+        # publisher construction to KeepLast(10).
+        undiscoverable_depth = (
+            HistoryPolicy.UNKNOWN,
+            0,
+            ReliabilityPolicy.BEST_EFFORT,
+            DurabilityPolicy.VOLATILE,
+        )
+        if actual_odom_qos not in (expected_odom_qos, undiscoverable_depth):
+            failures.append(
+                f'odom QoS: expected {expected_odom_qos}, got {actual_odom_qos}')
         if self.clock_regression is not None:
             failures.append(f'/clock moved backwards: {self.clock_regression}')
         if len(self.clock_samples) < 5:
@@ -107,6 +150,29 @@ class ContractProbe(Node):
         missing_tf = EXPECTED_STATIC_TF - self.static_tf
         if missing_tf:
             failures.append(f'missing static TF: {missing_tf}')
+        if ('odom', 'base_link') in self.static_tf | self.dynamic_tf:
+            failures.append(
+                'Gazebo fragment published contract-owned odom -> base_link TF')
+        conceptual_edges = self.static_tf | self.dynamic_tf
+        if self.odom_frames == ('odom', 'base_link'):
+            conceptual_edges.add(('odom', 'base_link'))
+        parents = {}
+        for parent, child in conceptual_edges:
+            parents.setdefault(child, set()).add(parent)
+        duplicate_parents = {
+            child: values for child, values in parents.items() if len(values) > 1}
+        if duplicate_parents:
+            failures.append(f'TF children with multiple parents: {duplicate_parents}')
+        required_chain = {
+            ('odom', 'base_link'),
+            ('base_link', 'base_footprint'),
+            ('base_link', 'lidar_link'),
+            ('base_link', 'imu_link'),
+            ('base_link', 'camera_link'),
+        }
+        missing_chain = required_chain - conceptual_edges
+        if missing_chain:
+            failures.append(f'missing conceptual TF chain edges: {missing_chain}')
         assert not failures, '; '.join(failures)
 
 

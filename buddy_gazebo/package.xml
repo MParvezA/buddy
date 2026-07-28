@@ -3,8 +3,8 @@
   <name>buddy_gazebo</name>
   <version>0.1.0</version>
   <description>Native Gazebo Harmonic world, model, bridges, and headless smoke tests for Buddy.</description>
-  <maintainer email="maintainers@example.com">Buddy maintainers</maintainer>
-  <license>Apache-2.0</license>
+  <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
+  <license>Proprietary</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>buddy_description</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>

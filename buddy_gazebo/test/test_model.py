@@ -26,3 +26,13 @@ class TestModel(unittest.TestCase):
         for topic in ('/clock', '/joint_states', '/odom/wheel', '/scan', '/imu/data_raw',
                       '/camera/image_raw', '/camera/camera_info'):
             self.assertIn(topic, bridge)
+
+    def test_adapter_declares_sim_time_and_restricts_drive_axes(self):
+        adapter = (PACKAGE / 'buddy_gazebo' / 'safe_cmd_vel_adapter.py').read_text()
+        self.assertIn("has_parameter('use_sim_time')", adapter)
+        self.assertIn("declare_parameter('use_sim_time', False)", adapter)
+        self.assertIn('message.linear.x = command.twist.linear.x', adapter)
+        self.assertIn('message.angular.z = command.twist.angular.z', adapter)
+        for forbidden_axis in ('message.linear.y =', 'message.linear.z =',
+                               'message.angular.x =', 'message.angular.y ='):
+            self.assertNotIn(forbidden_axis, adapter)

@@ -17,10 +17,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Buddy maintainers',
-    maintainer_email='maintainers@example.com',
+    maintainer='Parvez',
+    maintainer_email='mohamedparvez27@gmail.com',
     description='Gazebo Harmonic simulation support for Buddy.',
-    license='Apache-2.0',
+    license='Proprietary',
     test_suite='test.test_model',
     entry_points={'console_scripts': ['safe_cmd_vel_adapter = buddy_gazebo.safe_cmd_vel_adapter:main']},
 )

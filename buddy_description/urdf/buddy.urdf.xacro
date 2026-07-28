@@ -43,7 +43,7 @@
   <joint name="caster_joint" type="continuous"><parent link="base_link"/><child link="caster_link"/><origin xyz="-0.18 0 ${-body_height / 2 + 0.02}"/><axis xyz="0 0 1"/></joint>
 
   <xacro:macro name="sensor_link" params="name xyz rpy *sensor_geometry">
-    <link name="${name}"><visual><origin xyz="${xyz}" rpy="${rpy}"/><geometry><xacro:insert_block name="sensor_geometry"/></geometry><material name="sensor_black"/></visual></link>
+    <link name="${name}"><visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><xacro:insert_block name="sensor_geometry"/></geometry><material name="sensor_black"/></visual></link>
     <joint name="${name}_joint" type="fixed"><parent link="base_link"/><child link="${name}"/><origin xyz="${xyz}" rpy="${rpy}"/></joint>
   </xacro:macro>
   <xacro:sensor_link name="lidar_link" xyz="0.12 0 0.12" rpy="0 0 0"><cylinder radius="0.045" length="0.04"/></xacro:sensor_link>

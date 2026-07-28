@@ -30,6 +30,7 @@
     obstacle_stop_distance: 0.25
     obstacle_slowdown_distance: 0.6
     obstacle_front_arc_degrees: 60.0
+    obstacle_rear_arc_degrees: 60.0
     obstacle_stop_all_motion: true
     obstacle_scale_angular: true
     require_controller_diagnostics: false

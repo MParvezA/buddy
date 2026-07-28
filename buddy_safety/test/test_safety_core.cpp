@@ -35,21 +35,21 @@ geometry_msgs::msg::TwistStamped command(
 
 sensor_msgs::msg::LaserScan scan(
   const std::int64_t stamp_ns,
-  const float center_range)
+  const float front_range,
+  const float rear_range = std::numeric_limits<float>::infinity(),
+  const float side_range = std::numeric_limits<float>::infinity())
 {
   sensor_msgs::msg::LaserScan result;
   result.header.stamp = stamp(stamp_ns);
-  result.angle_min = -1.0F;
-  result.angle_max = 1.0F;
-  result.angle_increment = 0.5F;
+  result.angle_min = -3.1415927F;
+  result.angle_max = 3.1415927F;
+  result.angle_increment = 0.5235988F;
   result.range_min = 0.05F;
   result.range_max = 10.0F;
-  result.ranges = {
-    std::numeric_limits<float>::infinity(),
-    std::numeric_limits<float>::infinity(),
-    center_range,
-    std::numeric_limits<float>::infinity(),
-    std::numeric_limits<float>::infinity()};
+  result.ranges.assign(13, std::numeric_limits<float>::infinity());
+  result.ranges[0] = rear_range;
+  result.ranges[3] = side_range;
+  result.ranges[6] = front_range;
   return result;
 }
 
@@ -128,6 +128,100 @@ TEST(SafetyCore, StopsAndSlowsForFrontObstacle)
   EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
   EXPECT_DOUBLE_EQ(decision.output.twist.angular.z, 0.0);
   EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_SOFT_STOPPED);
+}
+
+TEST(SafetyCore, StopsAndSlowsReverseForRearObstacle)
+{
+  auto config = permissive_config();
+  config.require_scan = true;
+  config.obstacle_stop_distance = 0.25;
+  config.obstacle_slowdown_distance = 0.75;
+  config.obstacle_stop_all_motion = false;
+  const std::int64_t now = 10 * kSecond;
+  buddy_safety::SafetyCore safety(config, now - kSecond);
+
+  ASSERT_TRUE(safety.submit_command(command(now, -0.4, 0.0), now, now));
+  ASSERT_TRUE(safety.submit_scan(
+      scan(now, std::numeric_limits<float>::infinity(), 0.5F), now, now));
+  auto decision = safety.evaluate(now + 100000000, now + 100000000);
+  EXPECT_NEAR(decision.output.twist.linear.x, -0.2, 1e-6);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_LIMITED);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_COLLISION_RISK);
+
+  ASSERT_TRUE(safety.submit_scan(
+      scan(now + 100000000, std::numeric_limits<float>::infinity(), 0.2F),
+      now + 100000000, now + 100000000));
+  decision = safety.evaluate(now + 200000000, now + 200000000);
+  EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_SOFT_STOPPED);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_COLLISION_RISK);
+}
+
+TEST(SafetyCore, FrontObstaclePermitsStraightRetreatWhenStopAllMotionIsDisabled)
+{
+  auto config = permissive_config();
+  config.require_scan = true;
+  config.obstacle_stop_all_motion = false;
+  const std::int64_t now = 10 * kSecond;
+  buddy_safety::SafetyCore safety(config, now - kSecond);
+
+  ASSERT_TRUE(safety.submit_command(command(now, -0.4, 0.0), now, now));
+  ASSERT_TRUE(safety.submit_scan(scan(now, 0.2F), now, now));
+  const auto decision = safety.evaluate(now + 100000000, now + 100000000);
+
+  EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, -0.4);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_NORMAL);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_NONE);
+}
+
+TEST(SafetyCore, RotationStopsForCloseObstacleAnywhereAroundRobot)
+{
+  auto config = permissive_config();
+  config.require_scan = true;
+  config.obstacle_stop_all_motion = false;
+  const std::int64_t now = 10 * kSecond;
+  buddy_safety::SafetyCore safety(config, now - kSecond);
+
+  ASSERT_TRUE(safety.submit_command(command(now, 0.0, 0.6), now, now));
+  ASSERT_TRUE(safety.submit_scan(
+      scan(
+        now, std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::infinity(), 0.2F),
+      now, now));
+  const auto decision = safety.evaluate(now + 100000000, now + 100000000);
+
+  EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
+  EXPECT_DOUBLE_EQ(decision.output.twist.angular.z, 0.0);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_SOFT_STOPPED);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_COLLISION_RISK);
+}
+
+TEST(SafetyCore, RejectsMalformedOrInsufficientDirectionalScanCoverage)
+{
+  auto config = permissive_config();
+  config.require_scan = true;
+  const std::int64_t now = 10 * kSecond;
+  buddy_safety::SafetyCore safety(config, now - kSecond);
+  ASSERT_TRUE(safety.submit_command(command(now, -0.3, 0.0), now, now));
+
+  auto front_only = scan(now, 1.0F);
+  front_only.angle_min = -1.0F;
+  front_only.angle_max = 1.0F;
+  front_only.angle_increment = 0.5F;
+  front_only.ranges.assign(5, std::numeric_limits<float>::infinity());
+  std::string reason;
+  EXPECT_FALSE(safety.submit_scan(front_only, now, now, &reason));
+  EXPECT_EQ(reason, "scan has insufficient valid front or rear arc coverage");
+
+  auto malformed = scan(now, 1.0F);
+  malformed.angle_max = 100.0F;
+  EXPECT_FALSE(safety.submit_scan(malformed, now, now, &reason));
+  EXPECT_EQ(reason, "scan angle bounds do not match its sample count");
+
+  const auto decision = safety.evaluate(now + 100000000, now + 100000000);
+  EXPECT_DOUBLE_EQ(decision.output.twist.linear.x, 0.0);
+  EXPECT_EQ(decision.state, buddy_interfaces::msg::SafetyState::STATE_FAULT);
+  EXPECT_EQ(decision.reason_code, buddy_interfaces::msg::SafetyState::REASON_SENSOR_UNHEALTHY);
 }
 
 TEST(SafetyCore, StartupAndUnhealthySensorAlwaysProduceSafeZero)

@@ -24,6 +24,7 @@ struct SafetyConfig
   double obstacle_stop_distance{0.25};
   double obstacle_slowdown_distance{0.6};
   double obstacle_front_arc_radians{1.0471975512};
+  double obstacle_rear_arc_radians{1.0471975512};
   bool obstacle_stop_all_motion{true};
   bool obstacle_scale_angular{true};
   bool require_scan{true};
@@ -102,7 +103,9 @@ private:
   bool last_scan_valid_{false};
   builtin_interfaces::msg::Time last_scan_stamp_;
   std::int64_t scan_received_steady_ns_{0};
-  double nearest_obstacle_{std::numeric_limits<double>::infinity()};
+  double nearest_front_obstacle_{std::numeric_limits<double>::infinity()};
+  double nearest_rear_obstacle_{std::numeric_limits<double>::infinity()};
+  double nearest_obstacle_all_around_{std::numeric_limits<double>::infinity()};
 
   bool controller_status_seen_{false};
   bool controller_status_healthy_{true};

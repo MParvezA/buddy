@@ -37,3 +37,11 @@ def test_nav2_frames_topics_and_sim_time_are_contract_values():
     global_costmap = params['global_costmap']['global_costmap']['ros__parameters']
     assert local_costmap['global_frame'] == 'odom'
     assert global_costmap['global_frame'] == 'map'
+
+
+def test_costmaps_allow_bounded_time_for_startup_tf():
+    params = yaml.safe_load((PACKAGE / 'config' / 'nav2.yaml').read_text())
+    local_costmap = params['local_costmap']['local_costmap']['ros__parameters']
+    global_costmap = params['global_costmap']['global_costmap']['ros__parameters']
+    assert local_costmap['initial_transform_timeout'] == 20.0
+    assert global_costmap['initial_transform_timeout'] == 20.0

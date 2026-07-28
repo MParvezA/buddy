@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 from buddy_navigation.cancellation import confirm_downstream_cancel
@@ -32,13 +31,11 @@ class FakeNav2Goal:
 def test_cancel_reaches_fake_nav2_and_confirms_command_ceased():
     nav2 = FakeNav2Goal()
     terminal = CompleteFuture(SimpleNamespace(status=5))
-    result = asyncio.run(
-        confirm_downstream_cancel(
-            nav2,
-            terminal,
-            canceled_status=5,
-            timeout_sec=0.1,
-        )
+    result = confirm_downstream_cancel(
+        nav2,
+        terminal,
+        canceled_status=5,
+        timeout_sec=0.1,
     )
     assert result.confirmed
     assert nav2.cancel_calls == 1
@@ -51,13 +48,11 @@ def test_unacknowledged_cancel_is_not_reported_as_safe():
         SimpleNamespace(goals_canceling=[])
     )
     terminal = CompleteFuture(SimpleNamespace(status=5))
-    result = asyncio.run(
-        confirm_downstream_cancel(
-            nav2,
-            terminal,
-            canceled_status=5,
-            timeout_sec=0.1,
-        )
+    result = confirm_downstream_cancel(
+        nav2,
+        terminal,
+        canceled_status=5,
+        timeout_sec=0.1,
     )
     assert result.confirmed is False
     assert 'did not acknowledge' in result.message

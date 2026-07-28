@@ -1,6 +1,5 @@
 """Bounded downstream cancellation confirmation."""
 
-import asyncio
 from dataclasses import dataclass
 import time
 from typing import Any
@@ -14,7 +13,7 @@ class StopConfirmation:
     message: str
 
 
-async def confirm_downstream_cancel(
+def confirm_downstream_cancel(
     nav_goal_handle: Any,
     result_future: Any,
     *,
@@ -27,7 +26,7 @@ async def confirm_downstream_cancel(
     while not cancel_future.done():
         if time.monotonic() >= deadline:
             return StopConfirmation(False, 'Nav2 cancellation acknowledgement timed out')
-        await asyncio.sleep(0.01)
+        time.sleep(0.01)
     cancel_response = cancel_future.result()
     if not cancel_response.goals_canceling:
         return StopConfirmation(False, 'Nav2 did not acknowledge goal cancellation')
@@ -35,7 +34,7 @@ async def confirm_downstream_cancel(
     while not result_future.done():
         if time.monotonic() >= deadline:
             return StopConfirmation(False, 'Nav2 canceled terminal state timed out')
-        await asyncio.sleep(0.01)
+        time.sleep(0.01)
     wrapped_result = result_future.result()
     if wrapped_result.status != canceled_status:
         return StopConfirmation(

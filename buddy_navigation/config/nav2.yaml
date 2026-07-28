@@ -59,6 +59,7 @@ local_costmap:
   local_costmap:
     ros__parameters:
       use_sim_time: false
+      initial_transform_timeout: 20.0
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
@@ -101,6 +102,7 @@ global_costmap:
   global_costmap:
     ros__parameters:
       use_sim_time: false
+      initial_transform_timeout: 20.0
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map

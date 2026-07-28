@@ -1,6 +1,5 @@
 """Adapt Buddy named navigation goals to Nav2 NavigateToPose."""
 
-import asyncio
 import math
 import time
 
@@ -14,7 +13,7 @@ import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -111,7 +110,7 @@ class NamedNavigationAdapter(Node):
             timeout=Duration(seconds=0.05),
         )
 
-    async def _execute(self, goal_handle):
+    def _execute(self, goal_handle):
         self._latest_pose = None
         self._send_feedback(
             goal_handle,
@@ -126,15 +125,20 @@ class NamedNavigationAdapter(Node):
 
         request = ResolveNamedLocation.Request()
         request.name = goal_handle.request.location_name.strip()
-        try:
-            response = await asyncio.wait_for(
-                self._resolver.call_async(request), timeout=timeout
-            )
-        except (asyncio.TimeoutError, Exception) as error:
-            self.get_logger().error(f'named-location resolution failed: {error}')
+        resolve_future = self._resolver.call_async(request)
+        if not self._wait_future(resolve_future, timeout):
             return self._finish(
                 goal_handle, Outcome.FAILED, 'named-location resolution timed out'
             )
+        resolve_error = resolve_future.exception()
+        if resolve_error is not None:
+            self.get_logger().error(
+                f'named-location resolution failed: {resolve_error}'
+            )
+            return self._finish(
+                goal_handle, Outcome.FAILED, 'named-location resolution failed'
+            )
+        response = resolve_future.result()
 
         decision = check_preconditions(
             location_found=response.found and response.location.enabled,
@@ -157,12 +161,23 @@ class NamedNavigationAdapter(Node):
         nav_goal = NavigateToPose.Goal()
         nav_goal.pose = response.location.pose
         nav_goal.behavior_tree = ''
-        nav_handle = await self._nav2.send_goal_async(
+        nav_goal_future = self._nav2.send_goal_async(
             nav_goal,
             feedback_callback=lambda feedback: self._forward_feedback(
                 goal_handle, feedback.feedback
             ),
         )
+        if not self._wait_future(nav_goal_future, timeout):
+            return self._finish(
+                goal_handle, Outcome.FAILED, 'Nav2 goal submission timed out'
+            )
+        nav_goal_error = nav_goal_future.exception()
+        if nav_goal_error is not None:
+            self.get_logger().error(f'Nav2 goal submission failed: {nav_goal_error}')
+            return self._finish(
+                goal_handle, Outcome.FAILED, 'Nav2 goal submission failed'
+            )
+        nav_handle = nav_goal_future.result()
         if not nav_handle.accepted:
             return self._finish(
                 goal_handle, Outcome.UNREACHABLE, 'Nav2 rejected the destination'
@@ -173,7 +188,7 @@ class NamedNavigationAdapter(Node):
         navigation_timeout = float(self.get_parameter('navigation_timeout_sec').value)
         while not result_future.done():
             if goal_handle.is_cancel_requested:
-                return await self._stop_delegated_goal(
+                return self._stop_delegated_goal(
                     goal_handle,
                     nav_handle,
                     result_future,
@@ -181,7 +196,7 @@ class NamedNavigationAdapter(Node):
                     'navigation cancelled by client',
                 )
             if not self._motion_permitted():
-                return await self._stop_delegated_goal(
+                return self._stop_delegated_goal(
                     goal_handle,
                     nav_handle,
                     result_future,
@@ -189,14 +204,14 @@ class NamedNavigationAdapter(Node):
                     'navigation stopped by safety state',
                 )
             if time.monotonic() - started >= navigation_timeout:
-                return await self._stop_delegated_goal(
+                return self._stop_delegated_goal(
                     goal_handle,
                     nav_handle,
                     result_future,
                     Outcome.FAILED,
                     'navigation timed out; Nav2 stopped',
                 )
-            await asyncio.sleep(0.05)
+            time.sleep(0.05)
 
         wrapped_result = result_future.result()
         decision = nav2_terminal_outcome(
@@ -206,7 +221,7 @@ class NamedNavigationAdapter(Node):
         )
         return self._finish(goal_handle, decision.outcome, decision.message)
 
-    async def _stop_delegated_goal(
+    def _stop_delegated_goal(
         self,
         goal_handle,
         nav_handle,
@@ -214,7 +229,7 @@ class NamedNavigationAdapter(Node):
         outcome: Outcome,
         message: str,
     ):
-        confirmation = await confirm_downstream_cancel(
+        confirmation = confirm_downstream_cancel(
             nav_handle,
             result_future,
             canceled_status=GoalStatus.STATUS_CANCELED,
@@ -232,6 +247,15 @@ class NamedNavigationAdapter(Node):
             outcome,
             f'{message}; {confirmation.message}',
         )
+
+    @staticmethod
+    def _wait_future(future, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while not future.done():
+            if not rclpy.ok() or time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
 
     def _forward_feedback(self, goal_handle, nav_feedback) -> None:
         self._latest_pose = nav_feedback.current_pose
@@ -291,10 +315,19 @@ def main(args=None) -> None:
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        executor.shutdown()
-        node.destroy_node()
+        try:
+            executor.shutdown()
+        except (KeyboardInterrupt, ExternalShutdownException):
+            pass
+        try:
+            node.destroy_node()
+        except (KeyboardInterrupt, ExternalShutdownException):
+            pass
         if rclpy.ok():
-            rclpy.shutdown()
+            try:
+                rclpy.shutdown()
+            except (KeyboardInterrupt, ExternalShutdownException):
+                pass

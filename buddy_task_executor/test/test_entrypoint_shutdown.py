@@ -2,6 +2,8 @@
 
 import inspect
 import os
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,6 +14,81 @@ from rclpy.signals import SignalHandlerOptions
 
 class EntrypointShutdownTest(unittest.TestCase):
     """Keep shutdown behavior narrow and safe for launch signal handling."""
+
+    def test_executor_drain_retrieves_completed_future_outcome(self):
+        executor = object.__new__(executive.DrainingMultiThreadedExecutor)
+        future = Mock()
+        future.cancelled.return_value = False
+        future.done.return_value = True
+        future.exception.return_value = None
+        future.result.return_value = 'completed'
+        executor._futures = [future]
+        executor._sigint_gc = None
+
+        self.assertEqual(executor.drain_submitted_callbacks(0.0), ())
+        future.exception.assert_called_once_with()
+        future.result.assert_called_once_with()
+        self.assertEqual(executor._futures, [])
+
+    def test_executor_drain_raises_completed_future_exception(self):
+        executor = object.__new__(executive.DrainingMultiThreadedExecutor)
+        future = Mock()
+        error = RuntimeError('callback failed')
+        future.cancelled.return_value = False
+        future.done.return_value = True
+        future.exception.return_value = error
+        executor._futures = [future]
+        executor._sigint_gc = None
+
+        with self.assertRaisesRegex(RuntimeError, 'callback failed'):
+            executor.drain_submitted_callbacks(0.0)
+
+        future.exception.assert_called_once_with()
+        future.result.assert_not_called()
+        self.assertEqual(executor._futures, [])
+
+    def test_executor_drain_cancels_queued_future(self):
+        executor = object.__new__(executive.DrainingMultiThreadedExecutor)
+        future = Mock()
+        future.cancelled.return_value = False
+        future.done.return_value = False
+        future.executing.return_value = False
+        future.cancel.return_value = True
+        source = SimpleNamespace(topic='/buddy/tasks/execute')
+        executor._futures = [future]
+        executor._sigint_gc = None
+        executor._tasks_lock = threading.Lock()
+        executor._pending_tasks = {
+            future: SimpleNamespace(source_entity=source),
+        }
+
+        cancelled = executor.drain_submitted_callbacks(0.0)
+
+        self.assertEqual(len(cancelled), 1)
+        self.assertIn('/buddy/tasks/execute', cancelled[0])
+        future.cancel.assert_called_once_with()
+        self.assertEqual(executor._futures, [])
+
+    def test_executor_drain_times_out_for_executing_future(self):
+        executor = object.__new__(executive.DrainingMultiThreadedExecutor)
+        future = Mock()
+        future.cancelled.return_value = False
+        future.done.return_value = False
+        future.executing.return_value = True
+        source = SimpleNamespace(topic='/buddy/tasks/execute')
+        executor._futures = [future]
+        executor._sigint_gc = None
+        executor._tasks_lock = threading.Lock()
+        executor._pending_tasks = {
+            future: SimpleNamespace(source_entity=source),
+        }
+
+        with self.assertRaisesRegex(
+                TimeoutError, 'executor callbacks did not finish before shutdown'):
+            executor.drain_submitted_callbacks(0.0)
+
+        future.cancel.assert_not_called()
+        self.assertEqual(executor._futures, [future])
 
     def test_main_only_handles_shutdown_signals_and_checks_context(self):
         source = inspect.getsource(executive.main)
@@ -30,6 +107,8 @@ class EntrypointShutdownTest(unittest.TestCase):
         executor = Mock()
         executor.spin.side_effect = KeyboardInterrupt()
         executor.spin_once.side_effect = lambda timeout_sec: events.append('spin_once')
+        executor.drain_submitted_callbacks.side_effect = (
+            lambda timeout_sec: events.append('drain_callbacks') or ())
         executor.shutdown.side_effect = lambda: events.append('executor_shutdown')
         with (
                 patch.object(executive.rclpy, 'init') as initialize,
@@ -37,7 +116,8 @@ class EntrypointShutdownTest(unittest.TestCase):
                 patch.object(executive.rclpy, 'shutdown',
                              side_effect=lambda: events.append('rclpy_shutdown')),
                 patch.object(executive, 'TaskExecutive', return_value=node),
-                patch.object(executive, 'MultiThreadedExecutor', return_value=executor)):
+                patch.object(
+                    executive, 'DrainingMultiThreadedExecutor', return_value=executor)):
             executive.main(args=['--ros-args'])
 
         initialize.assert_called_once_with(
@@ -45,7 +125,7 @@ class EntrypointShutdownTest(unittest.TestCase):
         node.request_shutdown.assert_called_once_with()
         self.assertEqual(
             events,
-            ['request_shutdown', 'spin_once', 'executor_shutdown',
+            ['request_shutdown', 'spin_once', 'drain_callbacks', 'executor_shutdown',
              'destroy_node', 'rclpy_shutdown'])
 
     def test_destroy_node_explicitly_removes_owned_action_waitables(self):

@@ -111,7 +111,8 @@ class TaskExecutiveComponentTest(unittest.TestCase):
         rclpy.init()
         cls.executive = TaskExecutive()
         cls.executive.set_parameters([
-            Parameter('cancellation_wait_seconds', Parameter.Type.DOUBLE, 0.3)])
+            Parameter('cancellation_wait_seconds', Parameter.Type.DOUBLE, 0.3),
+            Parameter('summary_freshness_seconds', Parameter.Type.DOUBLE, 30.0)])
         cls.mocks = MockCapabilityActionServers()
         cls.probe = Node('task_executive_component_probe')
         cls.safety_probe = MockSafetyEmergencyStopConsumer()
@@ -199,6 +200,115 @@ class TaskExecutiveComponentTest(unittest.TestCase):
                 return
             time.sleep(0.01)
         self.fail('timed out waiting for expected condition')
+
+    def _readiness_diagnostic(self):
+        with patch.object(self.executive._diagnostics, 'publish') as publish:
+            self.executive._publish_diagnostics()
+        return publish.call_args.args[0].status[0]
+
+    @staticmethod
+    def _diagnostic_values(diagnostic):
+        return {item.key: item.value for item in diagnostic.values}
+
+    def test_readiness_is_false_at_startup_then_expires_by_steady_time(self):
+        """No simulated clock progress can keep stale authorization alive."""
+        status = RobotStatus()
+        status.localization_state = RobotStatus.LOCALIZATION_GOOD
+        status.motion_ready = True
+        status.safety.state = SafetyState.STATE_NORMAL
+        status.safety.motion_permitted = True
+        world = WorldSummary()
+        location = NamedLocation()
+        location.name = 'kitchen'
+        location.enabled = True
+        world.named_locations = [location]
+
+        with self.executive._lock:
+            original = (
+                self.executive._status,
+                self.executive._world,
+                self.executive._status_received_monotonic,
+                self.executive._world_received_monotonic,
+            )
+            self.executive._status = None
+            self.executive._world = None
+            self.executive._status_received_monotonic = None
+            self.executive._world_received_monotonic = None
+        self.executive.set_parameters([
+            Parameter('summary_freshness_seconds', Parameter.Type.DOUBLE, 0.5)])
+        try:
+            with patch('buddy_task_executor.executive.time.monotonic', return_value=100.0):
+                startup = self._readiness_diagnostic()
+                self.assertEqual(startup.level, DiagnosticStatus.WARN)
+                self.assertIn('not ready', startup.message)
+                self.assertEqual(self._diagnostic_values(startup), {
+                    'active_task': 'false',
+                    'lower_action_quarantined': 'false',
+                    'status_ready': 'false',
+                    'world_ready': 'false',
+                    'navigation_ready': 'true',
+                    'speech_ready': 'true',
+                    'accepting_tasks': 'false',
+                })
+                self.assertEqual(
+                    self.executive._available('report_status'),
+                    (False, 'robot status unavailable or stale'))
+                self.assertEqual(
+                    self.executive._precondition('navigate_to', {'location': 'kitchen'}),
+                    'robot status or world summary unavailable or stale')
+                self.executive._status_callback(status)
+                self.executive._world_callback(world)
+                ready = self._readiness_diagnostic()
+
+            self.assertEqual(ready.level, DiagnosticStatus.OK)
+            self.assertEqual(ready.message, 'task executive ready')
+            self.assertTrue(all(
+                value == 'true' for key, value in self._diagnostic_values(ready).items()
+                if key in {
+                    'status_ready', 'world_ready', 'navigation_ready', 'speech_ready',
+                    'accepting_tasks'}))
+
+            with patch('buddy_task_executor.executive.time.monotonic', return_value=100.51):
+                expired = self._readiness_diagnostic()
+                self.assertEqual(expired.level, DiagnosticStatus.WARN)
+                self.assertEqual(
+                    self.executive._precondition('navigate_to', {'location': 'kitchen'}),
+                    'robot status or world summary unavailable or stale')
+                self.assertEqual(
+                    self.executive._available('report_status'),
+                    (False, 'robot status unavailable or stale'))
+            values = self._diagnostic_values(expired)
+            self.assertEqual(values['status_ready'], 'false')
+            self.assertEqual(values['world_ready'], 'false')
+            self.assertEqual(values['accepting_tasks'], 'false')
+
+            with patch.object(
+                    self.executive._navigate_client, 'server_is_ready', return_value=False):
+                with patch('buddy_task_executor.executive.time.monotonic', return_value=100.0):
+                    self.executive._status_callback(status)
+                    self.executive._world_callback(world)
+                    no_navigation = self._readiness_diagnostic()
+            self.assertEqual(no_navigation.level, DiagnosticStatus.WARN)
+            self.assertEqual(
+                self._diagnostic_values(no_navigation)['navigation_ready'], 'false')
+        finally:
+            with self.executive._lock:
+                (self.executive._status,
+                 self.executive._world,
+                 self.executive._status_received_monotonic,
+                 self.executive._world_received_monotonic) = original
+            self.executive.set_parameters([
+                Parameter('summary_freshness_seconds', Parameter.Type.DOUBLE, 30.0)])
+
+    def test_summary_freshness_configuration_must_be_finite_and_positive(self):
+        for value in (0.0, float('nan'), float('inf')):
+            with self.subTest(value=value):
+                override = Parameter(
+                    'summary_freshness_seconds', Parameter.Type.DOUBLE, value)
+                with self.assertRaisesRegex(
+                        ValueError,
+                        'summary_freshness_seconds must be finite and greater than zero'):
+                    TaskExecutive(parameter_overrides=[override])
 
     def test_executes_speak_through_deterministic_mock_action(self):
         wrapped = self._wrapped_result(self._plan('speak'))

@@ -1,5 +1,8 @@
 """Pure deterministic tests for the replaceable voice provider layer."""
 
+from threading import Event
+import time
+
 from buddy_voice.emergency import is_emergency_stop_phrase, normalize_spoken_phrase
 from buddy_voice.providers import (
     FakeAudioInput,
@@ -27,7 +30,12 @@ def test_fake_tts_is_deterministic() -> None:
     """The fake TTS reports fixed duration and records its local request."""
     tts = FakeTextToSpeechProvider(duration_seconds=0.25)
 
-    assert tts.synthesize('hello', 'calm').duration_seconds == 0.25
+    assert tts.synthesize(
+        'hello',
+        'calm',
+        cancel_event=Event(),
+        deadline_monotonic=time.monotonic() + 1.0,
+    ).duration_seconds == 0.25
     assert tts.requests == [('hello', 'calm')]
 
 

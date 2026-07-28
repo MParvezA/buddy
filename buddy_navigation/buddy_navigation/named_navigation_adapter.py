@@ -37,7 +37,7 @@ LAUNCH_SIGINT_GRACE_SEC = 5.0
 ACTIVE_SHUTDOWN_TIMEOUT_SEC = 4.0
 EXECUTOR_DRAIN_TIMEOUT_SEC = 0.25
 WORKER_JOIN_TIMEOUT_SEC = 0.25
-OWNER_STATUS_HEARTBEAT_PERIOD_SEC = 0.1
+OWNER_STATUS_HEARTBEAT_PERIOD_SEC = 0.05
 
 
 class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
@@ -158,8 +158,12 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
 class NamedNavigationAdapter(Node):
     """Resolve semantic names, enforce preconditions, and delegate to Nav2."""
 
-    def __init__(self) -> None:
-        super().__init__('named_navigation_adapter', namespace='/buddy')
+    def __init__(self, *, parameter_overrides=None) -> None:
+        super().__init__(
+            'named_navigation_adapter',
+            namespace='/buddy',
+            parameter_overrides=parameter_overrides,
+        )
         self.declare_parameter('navigation_timeout_sec', 300.0)
         self.declare_parameter('dependency_timeout_sec', 2.0)
         self.declare_parameter('map_frame', 'map')
@@ -168,6 +172,17 @@ class NamedNavigationAdapter(Node):
             'owner_status_heartbeat_period_sec',
             OWNER_STATUS_HEARTBEAT_PERIOD_SEC,
         )
+        owner_heartbeat_period_sec = float(
+            self.get_parameter('owner_status_heartbeat_period_sec').value
+        )
+        if (
+            not math.isfinite(owner_heartbeat_period_sec)
+            or owner_heartbeat_period_sec <= 0.0
+        ):
+            raise ValueError(
+                'owner_status_heartbeat_period_sec '
+                'must be finite and positive'
+            )
 
         self._shutdown_requested = threading.Event()
         self._execution_idle = threading.Event()
@@ -220,13 +235,6 @@ class NamedNavigationAdapter(Node):
             cancel_callback=self._accept_cancel,
             callback_group=self._group,
         )
-        owner_heartbeat_period_sec = float(
-            self.get_parameter('owner_status_heartbeat_period_sec').value
-        )
-        if owner_heartbeat_period_sec <= 0.0:
-            raise ValueError(
-                'owner_status_heartbeat_period_sec must be positive'
-            )
         self._owner_status_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self._owner_status_timer = self.create_timer(
             owner_heartbeat_period_sec,

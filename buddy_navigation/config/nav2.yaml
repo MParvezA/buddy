@@ -226,9 +226,9 @@ named_navigation_adapter:
     dependency_timeout_sec: 2.0
     map_frame: map
     base_frame: base_link
-    owner_status_heartbeat_period_sec: 0.1
+    owner_status_heartbeat_period_sec: 0.05
 
 navigation_velocity_boundary:
   ros__parameters:
     use_sim_time: false
-    owner_liveness_timeout_sec: 0.5
+    owner_liveness_timeout_sec: 0.2

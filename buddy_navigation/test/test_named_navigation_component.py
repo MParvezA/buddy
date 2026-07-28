@@ -28,6 +28,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.clock import ClockType
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
@@ -257,6 +258,29 @@ def test_owner_status_heartbeat_only_publishes_for_reserved_goal():
     adapter._publish_owner_status_heartbeat()
 
     adapter._action._handle.publish_status.assert_called_once_with()
+
+
+def test_owner_status_heartbeat_period_rejects_nan(monkeypatch, tmp_path):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    try:
+        with pytest.raises(
+            ValueError,
+            match=(
+                'owner_status_heartbeat_period_sec '
+                'must be finite and positive'
+            ),
+        ):
+            NamedNavigationAdapter(
+                parameter_overrides=[
+                    Parameter(
+                        'owner_status_heartbeat_period_sec',
+                        value=float('nan'),
+                    ),
+                ],
+            )
+    finally:
+        rclpy.shutdown()
 
 
 def test_unexpected_execute_failure_aborts_with_custom_failure_result(

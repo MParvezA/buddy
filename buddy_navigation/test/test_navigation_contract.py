@@ -56,8 +56,11 @@ def test_action_owner_lease_has_periodic_status_margin():
         'navigation_velocity_boundary'
     ]['ros__parameters']['owner_liveness_timeout_sec']
 
+    assert heartbeat_period == 0.05
+    assert liveness_timeout == 0.2
     assert heartbeat_period > 0.0
     assert liveness_timeout >= 3.0 * heartbeat_period
+    assert liveness_timeout + 0.05 <= 0.25
 
 
 def test_slam_global_costmap_is_a_robot_centered_bounded_window():

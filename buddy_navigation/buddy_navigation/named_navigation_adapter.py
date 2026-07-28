@@ -23,6 +23,7 @@ from tf2_ros import Buffer, TransformListener
 
 from .action_execution import execute_with_failure_result
 from .cancellation import confirm_downstream_cancel
+from .executor_teardown import drain_and_stop_workers
 from .navigation_core import check_preconditions, nav2_terminal_outcome, Outcome
 
 
@@ -31,6 +32,10 @@ RESOLVE_SERVICE = '/buddy/world/resolve_named_location'
 NAV2_ACTION = '/navigate_to_pose'
 SAFETY_TOPIC = '/buddy/safety/state'
 DIAGNOSTICS_TOPIC = '/diagnostics'
+LAUNCH_SIGINT_GRACE_SEC = 5.0
+ACTIVE_SHUTDOWN_TIMEOUT_SEC = 4.0
+EXECUTOR_DRAIN_TIMEOUT_SEC = 0.25
+WORKER_JOIN_TIMEOUT_SEC = 0.25
 
 
 class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
@@ -55,11 +60,22 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
         """Cancel queued Tasks, then await and retrieve running Task outcomes."""
         deadline = time.monotonic() + timeout_sec
         cancelled_sources = []
-        while self._futures:
+        first_error = None
+        while True:
+            with self._tasks_lock:
+                tasks = list(self._pending_tasks)
+                for future in self._ready_tasks:
+                    if future not in tasks:
+                        tasks.append(future)
+                for future in self._futures:
+                    if future not in tasks:
+                        tasks.append(future)
+            if not tasks:
+                return tuple(cancelled_sources)
             made_progress = False
-            for future in self._futures[:]:
+            for future in tasks:
                 if future.cancelled():
-                    self._futures.remove(future)
+                    self._release_task(future)
                     made_progress = True
                     continue
                 if not future.done():
@@ -70,21 +86,32 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
                     source = None if task_data is None else task_data.source_entity
                     cancelled_sources.append(self._entity_description(source))
                     future.cancel()
-                    self._futures.remove(future)
-                    made_progress = True
+                    if future.cancelled():
+                        self._release_task(future)
+                        made_progress = True
                     continue
-                self._futures.remove(future)
                 error = future.exception()
+                self._release_task(future)
                 if error is not None:
-                    raise error
-                future.result()
+                    if first_error is None:
+                        first_error = error
+                else:
+                    future.result()
                 made_progress = True
-            if not self._futures:
+            with self._tasks_lock:
+                registries_empty = (
+                    not self._futures
+                    and not self._pending_tasks
+                    and not self._ready_tasks
+                )
+            if registries_empty:
+                if first_error is not None:
+                    raise first_error
                 return tuple(cancelled_sources)
             if time.monotonic() >= deadline:
                 pending = []
                 with self._tasks_lock:
-                    for future in self._futures:
+                    for future in self._pending_tasks:
                         task_data = self._pending_tasks.get(future)
                         source = None if task_data is None else task_data.source_entity
                         pending.append(
@@ -97,7 +124,33 @@ class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
                 )
             if not made_progress:
                 time.sleep(0.01)
-        return tuple(cancelled_sources)
+
+    def _release_task(self, future) -> None:
+        with self._tasks_lock:
+            self._futures[:] = [
+                task for task in self._futures if task is not future
+            ]
+            self._pending_tasks.pop(future, None)
+            self._ready_tasks = type(self._ready_tasks)(
+                task for task in self._ready_tasks if task is not future
+            )
+
+    def shutdown_workers(self, timeout_sec: float) -> None:
+        """Bound joining the private Jazzy ThreadPoolExecutor workers."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + timeout_sec
+        for thread in list(self._executor._threads):
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
+        alive = [
+            thread.name
+            for thread in self._executor._threads
+            if thread.is_alive()
+        ]
+        if alive:
+            raise TimeoutError(
+                'executor worker threads did not stop: ' + ', '.join(alive)
+            )
 
 
 class NamedNavigationAdapter(Node):
@@ -426,11 +479,14 @@ class NamedNavigationAdapter(Node):
         return self._execution_idle.is_set()
 
     def shutdown_timeout_seconds(self) -> float:
-        """Bound submission resolution plus downstream cancellation confirmation."""
+        """Reserve launch-grace time for executor and ROS entity teardown."""
         dependency_bound = float(
             self.get_parameter('dependency_timeout_sec').value
         )
-        return max(0.1, (2.0 * dependency_bound) + 0.5)
+        return min(
+            ACTIVE_SHUTDOWN_TIMEOUT_SEC,
+            max(0.1, (2.0 * dependency_bound) + EXECUTOR_DRAIN_TIMEOUT_SEC),
+        )
 
     def destroy_owned_entities(self) -> None:
         """Idempotently destroy action waitables before destroying the node."""
@@ -528,14 +584,21 @@ def main(args=None) -> None:
     except (KeyboardInterrupt, ExternalShutdownException):
         _drain_active_navigation(node, executor)
     finally:
-        cancelled_sources = executor.drain_submitted_callbacks(
-            min(0.5, node.shutdown_timeout_seconds())
+        teardown = drain_and_stop_workers(
+            executor,
+            drain_timeout_sec=min(
+                EXECUTOR_DRAIN_TIMEOUT_SEC,
+                node.shutdown_timeout_seconds(),
+            ),
+            worker_timeout_sec=WORKER_JOIN_TIMEOUT_SEC,
         )
-        if cancelled_sources:
+        if teardown.cancelled_sources:
             node.get_logger().info(
                 'cancelled queued callbacks before shutdown: '
-                + ', '.join(cancelled_sources)
+                + ', '.join(teardown.cancelled_sources)
             )
+        for error in teardown.errors:
+            node.get_logger().error(error)
         try:
             executor.shutdown()
         except (KeyboardInterrupt, ExternalShutdownException):

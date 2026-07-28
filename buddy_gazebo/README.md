@@ -1,0 +1,36 @@
+# Buddy Gazebo Harmonic layer
+
+This package owns the native Gazebo Harmonic simulation model and its bounded
+ROS launch fragment. It deliberately uses the installed Harmonic systems
+`gz::sim::systems::DiffDrive` and `JointStatePublisher`: `gz_ros2_control` is
+not installed in this development environment. The model therefore remains a
+supported Gazebo-native equivalent rather than pretending to provide a
+`ros2_control` hardware plugin.
+
+`safe_cmd_vel_adapter` is the only simulation motion boundary. It subscribes
+only to `/buddy/motion/safe_cmd_vel` (`geometry_msgs/msg/TwistStamped`, reliable
+depth 1) and publishes Gazebo's private `/model/buddy/cmd_vel`. It exposes no
+teleop, navigation, or raw-wheel bypass input. The future physical
+`diff_drive_controller` configuration is in `buddy_description/config` and
+uses `use_stamped_vel: true`, `cmd_vel_timeout: 0.25`, and
+`enable_odom_tf: false`; the eventual physical hardware plugin must be wired
+to that controller with its private `~/cmd_vel` remapped only from the frozen
+safe command topic.
+
+The bridge maps `/clock`, `/joint_states`, `/odom/wheel`, `/scan`,
+`/imu/data_raw`, `/camera/image_raw`, and `/camera/camera_info`. Sensor and
+wheel-state streams use the `SENSOR_DATA` profile (best effort, volatile).
+Gazebo also produces native bumper contacts at `bumper/contacts`; no frozen ROS
+bumper message/topic exists yet, so it is not bridged. The bridge never maps
+Gazebo's pose / TF stream, so it cannot compete with the contract-owned
+`odom -> base_link` EKF TF.
+
+Run headlessly after building:
+
+```bash
+source install/setup.bash
+bash buddy_gazebo/test/headless_smoke.sh
+```
+
+The smoke world is intentionally small and native to Harmonic. It does not
+clone or vendor the Gazebo Classic/Dashing AWS small-house world.

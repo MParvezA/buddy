@@ -1,0 +1,23 @@
+# Controller contract for a future ros2_control-backed hardware plugin.
+# The Gazebo Harmonic launch currently uses the native DiffDrive equivalent;
+# see buddy_gazebo/README.md. Keep this controller name and input shape stable.
+controller_manager:
+  ros__parameters:
+    update_rate: 50
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    buddy_base_controller:
+      type: diff_drive_controller/DiffDriveController
+
+buddy_base_controller:
+  ros__parameters:
+    left_wheel_names: [left_wheel_joint]
+    right_wheel_names: [right_wheel_joint]
+    wheel_separation: 0.39
+    wheel_radius: 0.065
+    publish_rate: 30.0
+    base_frame_id: base_link
+    odom_frame_id: odom
+    enable_odom_tf: false
+    use_stamped_vel: true
+    cmd_vel_timeout: 0.25

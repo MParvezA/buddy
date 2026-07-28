@@ -2,14 +2,18 @@
 
 from unittest.mock import patch
 
+from buddy_bringup import status_supervisor
 from buddy_bringup.status_supervisor import StatusSupervisor
 from buddy_interfaces.msg import RobotStatus, SafetyState, WorldSummary
 from diagnostic_msgs.msg import DiagnosticStatus
 import rclpy
 from rclpy.clock import ClockType
+from rclpy.signals import SignalHandlerOptions
 
 
 class _Recorder:
+    """Capture published ROS messages without graph discovery."""
+
     def __init__(self):
         self.messages = []
 
@@ -96,3 +100,30 @@ def test_unreceived_dependencies_are_warning_not_stale_fault(
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_entrypoint_uses_python_sigint_for_ordered_steady_timer_teardown():
+    """The steady-clock wait set is destroyed before the ROS context."""
+    node = _Recorder()
+    node.destroy_node = lambda: node.messages.append('destroyed')
+    with (
+        patch.object(status_supervisor.rclpy, 'init') as initialize,
+        patch.object(
+            status_supervisor,
+            'StatusSupervisor',
+            return_value=node,
+        ),
+        patch.object(
+            status_supervisor.rclpy,
+            'spin',
+            side_effect=KeyboardInterrupt,
+        ),
+        patch.object(status_supervisor.rclpy, 'ok', return_value=False),
+    ):
+        status_supervisor.main(args=['--ros-args'])
+
+    initialize.assert_called_once_with(
+        args=['--ros-args'],
+        signal_handler_options=SignalHandlerOptions.NO,
+    )
+    assert node.messages == ['destroyed']

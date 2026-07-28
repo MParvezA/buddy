@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 import time
 
-import rclpy
+from buddy_interfaces.msg import RobotStatus, SafetyState, WorldSummary
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -16,8 +17,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-
-from buddy_interfaces.msg import RobotStatus, SafetyState, WorldSummary
+from rclpy.signals import SignalHandlerOptions
 
 from .status_core import decide_status
 
@@ -179,7 +179,9 @@ class StatusSupervisor(Node):
 
 def main(args: list[str] | None = None) -> None:
     """Run the root-owned status supervisor."""
-    rclpy.init(args=args)
+    # Let Python deliver SIGINT as KeyboardInterrupt so teardown remains
+    # ordered even with a separate steady-clock timer in the executor wait set.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = StatusSupervisor()
     try:
         rclpy.spin(node)

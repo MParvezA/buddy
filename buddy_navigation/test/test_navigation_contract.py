@@ -45,3 +45,12 @@ def test_costmaps_allow_bounded_time_for_startup_tf():
     global_costmap = params['global_costmap']['global_costmap']['ros__parameters']
     assert local_costmap['initial_transform_timeout'] == 20.0
     assert global_costmap['initial_transform_timeout'] == 20.0
+
+
+def test_slam_global_costmap_is_a_robot_centered_bounded_window():
+    params = yaml.safe_load((PACKAGE / 'config' / 'nav2.yaml').read_text())
+    global_costmap = params['global_costmap']['global_costmap']['ros__parameters']
+
+    assert global_costmap['rolling_window'] is True
+    assert global_costmap['width'] == 20
+    assert global_costmap['height'] == 20

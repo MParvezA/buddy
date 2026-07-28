@@ -1,0 +1,39 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+    use_sim_time: true
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    buddy_base_controller:
+      type: diff_drive_controller/DiffDriveController
+
+buddy_base_controller:
+  ros__parameters:
+    left_wheel_names:
+      - left_wheel_joint
+    right_wheel_names:
+      - right_wheel_joint
+    wheel_separation: 0.39
+    wheel_radius: 0.065
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+    base_frame_id: base_link
+    odom_frame_id: odom
+    enable_odom_tf: false
+    open_loop: false
+    position_feedback: true
+    publish_rate: 50.0
+    cmd_vel_timeout: 0.25
+    velocity_rolling_window_size: 10
+    publish_limited_velocity: false
+    linear.x.max_velocity: .NAN
+    linear.x.min_velocity: .NAN
+    linear.x.max_acceleration: .NAN
+    linear.x.max_deceleration: .NAN
+    angular.z.max_velocity: .NAN
+    angular.z.min_velocity: .NAN
+    angular.z.max_acceleration: .NAN
+    angular.z.max_deceleration: .NAN

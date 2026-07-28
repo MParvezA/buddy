@@ -1,0 +1,48 @@
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+/buddy/command_arbiter:
+  ros__parameters:
+    command_timeout_ms: 250.0
+    future_tolerance_ms: 100.0
+    publish_rate_hz: 50.0
+    navigation_topic: /buddy/motion/request/navigation
+    teleop_topic: /buddy/motion/request/teleop
+    docking_topic: /buddy/motion/request/docking
+    recovery_topic: /buddy/motion/request/recovery
+    output_topic: /buddy/motion/arbitrated_cmd_vel
+    diagnostics_topic: /diagnostics
+
+/buddy/safety_filter:
+  ros__parameters:
+    max_linear_velocity: 0.5
+    max_angular_velocity: 1.0
+    max_linear_acceleration: 0.75
+    max_angular_acceleration: 1.5
+    command_timeout_ms: 250.0
+    future_tolerance_ms: 100.0
+    publish_rate_hz: 50.0
+    startup_inhibit_ms: 500.0
+    require_scan: true
+    scan_timeout_ms: 500.0
+    scan_topic: /scan
+    obstacle_stop_distance: 0.25
+    obstacle_slowdown_distance: 0.6
+    obstacle_front_arc_degrees: 60.0
+    obstacle_stop_all_motion: true
+    obstacle_scale_angular: true
+    require_controller_diagnostics: false
+    controller_diagnostics_timeout_ms: 500.0
+    controller_diagnostic_name: buddy_base_controller
+    diagnostics_topic: /diagnostics
+    physical_emergency_stop_active: false
+    allowed_reset_sources:
+      - operator
+      - safety_panel
+      - physical_panel
+    command_topic: /buddy/motion/arbitrated_cmd_vel
+    output_topic: /buddy/motion/safe_cmd_vel
+    emergency_stop_topic: /buddy/safety/emergency_stop/request
+    reset_service: /buddy/safety/emergency_stop/reset
+    state_topic: /buddy/safety/state

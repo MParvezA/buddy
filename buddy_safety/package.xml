@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>buddy_safety</name>
+  <version>0.1.0</version>
+  <description>Deterministic command arbitration and motion safety for Buddy.</description>
+
+  <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>buddy_interfaces</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

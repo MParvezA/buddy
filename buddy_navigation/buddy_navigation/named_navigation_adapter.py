@@ -32,6 +32,72 @@ SAFETY_TOPIC = '/buddy/safety/state'
 DIAGNOSTICS_TOPIC = '/diagnostics'
 
 
+class DrainingMultiThreadedExecutor(MultiThreadedExecutor):
+    """Jazzy multi-threaded executor with an explicit callback drain.
+
+    Jazzy has no public API for awaiting the rclpy Tasks submitted to its
+    thread pool. Its ``_futures`` list is the version-scoped registry used by
+    ``_spin_once_impl`` itself, and the spin thread is stopped before this
+    method is called.
+    """
+
+    @staticmethod
+    def _entity_description(entity) -> str:
+        description = f'{type(entity).__module__}.{type(entity).__name__}'
+        topic = getattr(entity, 'topic', None)
+        if topic:
+            description += f'({topic})'
+        return description
+
+    def drain_submitted_callbacks(self, timeout_sec: float) -> tuple[str, ...]:
+        """Cancel queued Tasks, then await and retrieve running Task outcomes."""
+        deadline = time.monotonic() + timeout_sec
+        cancelled_sources = []
+        while self._futures:
+            made_progress = False
+            for future in self._futures[:]:
+                if future.cancelled():
+                    self._futures.remove(future)
+                    made_progress = True
+                    continue
+                if not future.done():
+                    if future.executing():
+                        continue
+                    with self._tasks_lock:
+                        task_data = self._pending_tasks.get(future)
+                    source = None if task_data is None else task_data.source_entity
+                    cancelled_sources.append(self._entity_description(source))
+                    future.cancel()
+                    self._futures.remove(future)
+                    made_progress = True
+                    continue
+                self._futures.remove(future)
+                error = future.exception()
+                if error is not None:
+                    raise error
+                future.result()
+                made_progress = True
+            if not self._futures:
+                return tuple(cancelled_sources)
+            if time.monotonic() >= deadline:
+                pending = []
+                with self._tasks_lock:
+                    for future in self._futures:
+                        task_data = self._pending_tasks.get(future)
+                        source = None if task_data is None else task_data.source_entity
+                        pending.append(
+                            f'{self._entity_description(source)}'
+                            f'(executing={future.executing()})'
+                        )
+                raise TimeoutError(
+                    'executor callbacks did not finish before shutdown: '
+                    + ', '.join(pending)
+                )
+            if not made_progress:
+                time.sleep(0.01)
+        return tuple(cancelled_sources)
+
+
 class NamedNavigationAdapter(Node):
     """Resolve semantic names, enforce preconditions, and delegate to Nav2."""
 
@@ -47,6 +113,9 @@ class NamedNavigationAdapter(Node):
         self._execution_idle.set()
         self._goal_lock = threading.Lock()
         self._goal_reserved = False
+        self._owned_entity_lock = threading.Lock()
+        self._action_destroyed = False
+        self._nav2_destroyed = False
         self._group = ReentrantCallbackGroup()
         self._resolver = self.create_client(
             ResolveNamedLocation, RESOLVE_SERVICE, callback_group=self._group
@@ -310,6 +379,21 @@ class NamedNavigationAdapter(Node):
         )
         return max(0.1, (2.0 * dependency_bound) + 0.5)
 
+    def destroy_owned_entities(self) -> None:
+        """Idempotently destroy action waitables before destroying the node."""
+        with self._owned_entity_lock:
+            if not self._action_destroyed:
+                self._action.destroy()
+                self._action_destroyed = True
+            if not self._nav2_destroyed:
+                self._nav2.destroy()
+                self._nav2_destroyed = True
+
+    def destroy_node(self):
+        """Destroy action waitables before the node-owned ROS entities."""
+        self.destroy_owned_entities()
+        return super().destroy_node()
+
     @staticmethod
     def _wait_future(future, timeout_sec: float) -> bool:
         deadline = time.monotonic() + timeout_sec
@@ -384,13 +468,21 @@ def _drain_active_navigation(node, executor) -> None:
 def main(args=None) -> None:
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = NamedNavigationAdapter()
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = DrainingMultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         _drain_active_navigation(node, executor)
     finally:
+        cancelled_sources = executor.drain_submitted_callbacks(
+            min(0.5, node.shutdown_timeout_seconds())
+        )
+        if cancelled_sources:
+            node.get_logger().info(
+                'cancelled queued callbacks before shutdown: '
+                + ', '.join(cancelled_sources)
+            )
         try:
             executor.shutdown()
         except (KeyboardInterrupt, ExternalShutdownException):

@@ -16,6 +16,7 @@ slice.
 - [Software architecture](docs/buddy-architecture.md)
 - [Frozen ROS contract](docs/contracts/README.md)
 - [Implementation status and limitations](docs/implementation-status.md)
+- [Integrated validation report](docs/validation-report.md)
 
 ## Target environment
 

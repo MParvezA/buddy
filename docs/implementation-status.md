@@ -103,3 +103,6 @@ Connect one end-to-end local voice path without expanding robot authority:
 
 This slice should not change movement topics, controller access, safety
 semantics, or capability validation.
+
+The build, test, Gazebo, end-to-end, and safety evidence for this implementation
+round is recorded in [the validation report](validation-report.md).

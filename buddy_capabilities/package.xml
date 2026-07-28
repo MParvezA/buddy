@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>buddy_capabilities</name>
+  <version>0.1.0</version>
+  <description>Capability schema registry for Buddy task execution.</description>
+  <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>buddy_interfaces</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>rclpy</depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

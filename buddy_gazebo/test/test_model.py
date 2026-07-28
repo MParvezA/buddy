@@ -19,8 +19,21 @@ class TestModel(unittest.TestCase):
         self.assertIsNotNone(model.find(".//joint[@name='right_wheel_joint']"))
         sensor_types = {sensor.attrib['type'] for sensor in model.findall('.//sensor')}
         self.assertTrue({'gpu_lidar', 'imu', 'camera', 'contact'} <= sensor_types)
+        sensor_frames = {
+            sensor.attrib['type']: sensor.findtext('gz_frame_id')
+            for sensor in model.findall('.//sensor')
+            if sensor.attrib['type'] != 'contact'
+        }
+        self.assertEqual(sensor_frames, {
+            'gpu_lidar': 'lidar_link',
+            'imu': 'imu_link',
+            'camera': 'camera_optical_frame',
+        })
         plugin_names = {plugin.attrib['name'] for plugin in model.findall('plugin')}
         self.assertIn('gz::sim::systems::DiffDrive', plugin_names)
+        drive = model.find("plugin[@name='gz::sim::systems::DiffDrive']")
+        self.assertEqual(drive.findtext('frame_id'), 'odom')
+        self.assertEqual(drive.findtext('child_frame_id'), 'base_link')
 
     def test_bridge_keeps_frozen_sensor_topics(self):
         bridge = (PACKAGE / 'config' / 'bridge.yaml').read_text()

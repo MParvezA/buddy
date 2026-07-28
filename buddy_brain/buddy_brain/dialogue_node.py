@@ -38,6 +38,9 @@ from buddy_brain.dialogue_core import (
 from buddy_brain.model_provider import DeterministicFakeProvider
 
 
+READINESS_CHECK_PERIOD_SECONDS = 0.25
+
+
 def _uuid_message(value: uuid.UUID) -> Any:
     """Populate a generated UUID message without accepting model-generated IDs."""
     from unique_identifier_msgs.msg import UUID
@@ -138,9 +141,17 @@ class DialogueNode(Node):
         self._capabilities_client = self.create_client(ListCapabilities, "/buddy/capabilities/list")
         self._execute_client = ActionClient(self, ExecuteTask, "/buddy/tasks/execute")
         self._speak_client = ActionClient(self, Speak, "/buddy/voice/speak")
-        self._capability_timer = self.create_timer(2.0, self._refresh_capabilities)
-        self._diagnostic_timer = self.create_timer(5.0, self._publish_diagnostics)
         self._capabilities_in_flight = False
+        self._capabilities_ready = False
+        self._capability_count = 0
+        self._capability_timer = self.create_timer(
+            READINESS_CHECK_PERIOD_SECONDS, self._refresh_capabilities
+        )
+        self._diagnostic_timer = self.create_timer(
+            READINESS_CHECK_PERIOD_SECONDS, self._publish_diagnostics
+        )
+        self._refresh_capabilities()
+        self._publish_diagnostics()
 
     def _on_status(self, message: RobotStatus) -> None:
         self._core.update_status(_status_summary(message))
@@ -153,19 +164,39 @@ class DialogueNode(Node):
             self._dispatch(self._core.receive_final_utterance(message.text))
 
     def _refresh_capabilities(self) -> None:
-        if self._capabilities_in_flight or not self._capabilities_client.service_is_ready():
+        if self._capabilities_in_flight:
+            return
+        if not self._capabilities_client.service_is_ready():
+            self._clear_capability_state()
             return
         self._capabilities_in_flight = True
-        future = self._capabilities_client.call_async(ListCapabilities.Request())
-        future.add_done_callback(self._on_capabilities)
+        try:
+            future = self._capabilities_client.call_async(ListCapabilities.Request())
+            if future is None or not callable(getattr(future, "add_done_callback", None)):
+                raise RuntimeError("capability service returned an invalid response future")
+            future.add_done_callback(self._on_capabilities)
+        except Exception as exc:
+            self._capabilities_in_flight = False
+            self._clear_capability_state()
+            self.get_logger().warning(f"capability refresh could not start: {exc}")
 
     def _on_capabilities(self, future: Any) -> None:
         self._capabilities_in_flight = False
         try:
             response = future.result()
-            self._core.update_capabilities([_capability_schema(item) for item in response.capabilities])
+            capabilities = [_capability_schema(item) for item in response.capabilities]
+            self._core.update_capabilities(capabilities)
+            self._capability_count = len(capabilities)
+            self._capabilities_ready = self._capability_count > 0
         except Exception as exc:  # ROS service failures are reported diagnostically, not bypassed.
+            self._clear_capability_state()
             self.get_logger().warning(f"capability refresh failed: {exc}")
+
+    def _clear_capability_state(self) -> None:
+        """Revoke cached capability authorization when registry liveness is lost."""
+        self._core.update_capabilities([])
+        self._capabilities_ready = False
+        self._capability_count = 0
 
     def _dispatch(self, effects: list[DialogueEffect]) -> None:
         for effect in effects:
@@ -551,14 +582,22 @@ class DialogueNode(Node):
         self._diagnostics_publisher.publish(diagnostics)
 
     def _publish_diagnostics(self) -> None:
+        task_executor_ready = self._execute_client.server_is_ready()
+        speech_ready = self._speak_client.server_is_ready()
+        ready = self._capabilities_ready and task_executor_ready and speech_ready
         diagnostics = DiagnosticArray()
         diagnostics.header.stamp = self.get_clock().now().to_msg()
         status = DiagnosticStatus()
         status.name = "buddy_dialogue"
         status.hardware_id = "buddy_brain"
-        status.level = DiagnosticStatus.OK
-        status.message = "bounded dialogue ready"
-        status.values = [KeyValue(key="capability_source", value="/buddy/capabilities/list")]
+        status.level = DiagnosticStatus.OK if ready else DiagnosticStatus.WARN
+        status.message = "bounded dialogue ready" if ready else "waiting for dialogue dependencies"
+        status.values = [
+            KeyValue(key="capabilities_ready", value=str(self._capabilities_ready).lower()),
+            KeyValue(key="capability_count", value=str(self._capability_count)),
+            KeyValue(key="task_executor_ready", value=str(task_executor_ready).lower()),
+            KeyValue(key="speech_ready", value=str(speech_ready).lower()),
+        ]
         diagnostics.status = [status]
         self._diagnostics_publisher.publish(diagnostics)
 

@@ -17,6 +17,7 @@ import pytest
 import rclpy
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from geometry_msgs.msg import TwistStamped
 from launch.substitutions import PathJoinSubstitution
 from rclpy.action import ActionClient
@@ -214,6 +215,8 @@ class EndToEndSystemTest(unittest.TestCase):
         cls.spoken = []
         cls.safe_commands = []
         cls.status = None
+        cls.dialogue_ready = False
+        cls.task_executor_ready = False
         cls.node.create_subscription(
             String,
             '/buddy/test/spoken',
@@ -231,6 +234,12 @@ class EndToEndSystemTest(unittest.TestCase):
             '/buddy/status',
             cls._receive_status,
             state_qos,
+        )
+        cls.node.create_subscription(
+            DiagnosticArray,
+            '/diagnostics',
+            cls._receive_diagnostics,
+            event_qos,
         )
         cls.navigation = ActionClient(
             cls.node,
@@ -250,6 +259,27 @@ class EndToEndSystemTest(unittest.TestCase):
     @classmethod
     def _receive_status(cls, message):
         cls.status = message
+
+    @classmethod
+    def _receive_diagnostics(cls, message):
+        for status in message.status:
+            values = {item.key: item.value for item in status.values}
+            if status.name == 'buddy_dialogue':
+                cls.dialogue_ready = (
+                    status.level == DiagnosticStatus.OK
+                    and values.get('capabilities_ready') == 'true'
+                    and values.get('task_executor_ready') == 'true'
+                    and values.get('speech_ready') == 'true'
+                )
+            elif status.name == 'buddy_task_executive':
+                cls.task_executor_ready = (
+                    status.level == DiagnosticStatus.OK
+                    and values.get('status_ready') == 'true'
+                    and values.get('world_ready') == 'true'
+                    and values.get('navigation_ready') == 'true'
+                    and values.get('speech_ready') == 'true'
+                    and values.get('accepting_tasks') == 'true'
+                )
 
     @classmethod
     def _wait_for(cls, predicate, timeout=12.0):
@@ -278,7 +308,9 @@ class EndToEndSystemTest(unittest.TestCase):
             lambda: self.status is not None and self.status.motion_ready
         )
         self._wait_for(lambda: self.navigation.server_is_ready())
-        time.sleep(2.5)
+        self._wait_for(lambda: self.utterance.get_subscription_count() > 0)
+        self._wait_for(lambda: self.dialogue_ready)
+        self._wait_for(lambda: self.task_executor_ready)
         self._publish_utterance('go home')
         self._wait_for(
             lambda: any('proceed' in text.casefold() for text in self.spoken)

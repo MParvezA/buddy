@@ -1,5 +1,6 @@
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from action_msgs.msg import GoalStatus
@@ -30,6 +31,87 @@ def wait_future(future, timeout_sec=5.0):
         time.sleep(0.01)
     assert future.done()
     return future.result()
+
+
+class ImmediateFuture:
+
+    def __init__(self, value=None, *, error=None):
+        self._value = value
+        self._error = error
+
+    def done(self):
+        return True
+
+    def exception(self):
+        return self._error
+
+    def result(self):
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+class FakeAcceptedNav2Goal:
+
+    accepted = True
+
+    def __init__(self, result_future, *, cancel_error=None):
+        self._result_future = result_future
+        self._cancel_error = cancel_error
+        self.cancel_calls = 0
+        self.command_active = True
+
+    def get_result_async(self):
+        return self._result_future
+
+    def cancel_goal_async(self):
+        self.cancel_calls += 1
+        self.command_active = False
+        return ImmediateFuture(
+            SimpleNamespace(goals_canceling=[object()]),
+            error=self._cancel_error,
+        )
+
+
+def make_unit_adapter(nav_handle):
+    adapter = object.__new__(NamedNavigationAdapter)
+    adapter._latest_pose = None
+    adapter._shutdown_requested = threading.Event()
+    adapter._goal_lock = threading.Lock()
+    adapter._goal_reserved = True
+    adapter._execution_idle = threading.Event()
+    adapter._delegated_goal_lock = threading.Lock()
+    adapter._delegated_nav_handle = None
+    adapter._delegated_result_future = None
+    adapter._delegated_cancel_timeout = 0.1
+    adapter._send_feedback = Mock()
+    adapter._publish_diagnostic = Mock()
+    adapter.get_logger = Mock(return_value=Mock())
+    adapter.get_parameter = Mock(
+        side_effect=lambda name: SimpleNamespace(
+            value=0.1 if name == 'dependency_timeout_sec' else 10.0
+        )
+    )
+
+    response = ResolveNamedLocation.Response()
+    response.found = True
+    response.location.enabled = True
+    response.location.pose.header.frame_id = 'map'
+    response.location.pose.pose.orientation.w = 1.0
+    adapter._resolver = Mock()
+    adapter._resolver.wait_for_service.return_value = True
+    adapter._resolver.call_async.return_value = ImmediateFuture(response)
+    adapter._localization_available = Mock(return_value=True)
+    adapter._safety = SafetyState()
+    adapter._motion_permitted = Mock(return_value=True)
+    adapter._nav2 = Mock()
+    adapter._nav2.wait_for_server.return_value = True
+    adapter._nav2.send_goal_async.return_value = ImmediateFuture(nav_handle)
+
+    goal_handle = Mock()
+    goal_handle.request = SimpleNamespace(location_name='kitchen')
+    goal_handle.is_cancel_requested = False
+    return adapter, goal_handle
 
 
 class FakeNavigationDependencies(Node):
@@ -133,6 +215,7 @@ def test_named_action_uses_rclpy_executor_without_asyncio(monkeypatch, tmp_path)
         goal_handle = wait_future(client.send_goal_async(goal))
         assert goal_handle.accepted
         wrapped_result = wait_future(goal_handle.get_result_async())
+        assert wrapped_result.status == GoalStatus.STATUS_SUCCEEDED
         assert wrapped_result.result.outcome == (
             NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED
         )
@@ -144,6 +227,192 @@ def test_named_action_uses_rclpy_executor_without_asyncio(monkeypatch, tmp_path)
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def test_unexpected_execute_failure_aborts_with_custom_failure_result(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    monkeypatch.setenv('ROS_DOMAIN_ID', '172')
+    monkeypatch.setenv('ROS_AUTOMATIC_DISCOVERY_RANGE', 'LOCALHOST')
+    rclpy.init()
+    adapter = NamedNavigationAdapter()
+    adapter._execute_goal = Mock(
+        side_effect=RuntimeError('injected adapter failure')
+    )
+    client_node = rclpy.create_node('named_navigation_failure_client')
+    client = ActionClient(
+        client_node,
+        NavigateToNamedLocation,
+        '/buddy/navigation/navigate_to_named_location',
+    )
+    executor = MultiThreadedExecutor(num_threads=4)
+    for node in (adapter, client_node):
+        executor.add_node(node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    try:
+        assert client.wait_for_server(timeout_sec=2.0)
+        goal = NavigateToNamedLocation.Goal()
+        goal.location_name = 'kitchen'
+        goal_handle = wait_future(client.send_goal_async(goal))
+        assert goal_handle.accepted
+
+        wrapped_result = wait_future(goal_handle.get_result_async())
+
+        assert wrapped_result.status == GoalStatus.STATUS_ABORTED
+        assert wrapped_result.result.outcome == (
+            NavigateToNamedLocation.Result.OUTCOME_FAILED
+        )
+        assert wrapped_result.result.message
+        assert 'injected adapter failure' in wrapped_result.result.message
+        assert adapter._goal_reserved is False
+        assert adapter.shutdown_complete()
+    finally:
+        executor.shutdown()
+        spin_thread.join(timeout=2.0)
+        for node in (adapter, client_node):
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_nav2_result_future_exception_aborts_and_attempts_safe_stop():
+    result_future = ImmediateFuture(
+        error=RuntimeError('Nav2 result transport lost')
+    )
+    nav_handle = FakeAcceptedNav2Goal(result_future)
+    adapter, goal_handle = make_unit_adapter(nav_handle)
+
+    result = adapter._execute(goal_handle)
+
+    assert result.outcome == NavigateToNamedLocation.Result.OUTCOME_FAILED
+    assert result.message
+    assert 'Nav2 result transport lost' in result.message
+    assert 'safe Nav2 stop could not be confirmed' in result.message
+    assert nav_handle.cancel_calls == 1
+    assert nav_handle.command_active is False
+    goal_handle.abort.assert_called_once_with()
+    goal_handle.succeed.assert_not_called()
+    goal_handle.canceled.assert_not_called()
+    assert adapter._goal_reserved is False
+    assert adapter.shutdown_complete()
+
+
+def test_missing_nav2_result_future_still_attempts_cancel():
+    nav_handle = FakeAcceptedNav2Goal(ImmediateFuture())
+    nav_handle.get_result_async = Mock(
+        side_effect=RuntimeError('cannot request Nav2 result')
+    )
+    adapter, goal_handle = make_unit_adapter(nav_handle)
+
+    result = adapter._execute(goal_handle)
+
+    assert result.outcome == NavigateToNamedLocation.Result.OUTCOME_FAILED
+    assert 'cannot request Nav2 result' in result.message
+    assert 'safe Nav2 stop could not be confirmed' in result.message
+    assert 'result future is unavailable' in result.message
+    assert nav_handle.cancel_calls == 1
+    assert nav_handle.command_active is False
+    goal_handle.abort.assert_called_once_with()
+    assert adapter._goal_reserved is False
+    assert adapter.shutdown_complete()
+
+
+def test_cancel_future_exception_aborts_without_claiming_safe_stop():
+    result_future = ImmediateFuture(
+        error=RuntimeError('Nav2 result transport lost')
+    )
+    nav_handle = FakeAcceptedNav2Goal(
+        result_future,
+        cancel_error=RuntimeError('cancel transport lost'),
+    )
+    adapter, goal_handle = make_unit_adapter(nav_handle)
+
+    result = adapter._execute(goal_handle)
+
+    assert result.outcome == NavigateToNamedLocation.Result.OUTCOME_FAILED
+    assert 'safe Nav2 stop could not be confirmed' in result.message
+    assert 'cancel transport lost' in result.message
+    assert 'cancellation and stopped state confirmed' not in result.message
+    assert nav_handle.cancel_calls == 1
+    assert nav_handle.command_active is False
+    goal_handle.abort.assert_called_once_with()
+    goal_handle.canceled.assert_not_called()
+    assert adapter._goal_reserved is False
+    assert adapter.shutdown_complete()
+
+
+@pytest.mark.parametrize(
+    ('failing_boundary', 'expected_message'),
+    [
+        ('resolver_call', 'resolver submission failed'),
+        ('resolver_future', 'named-location resolution failed'),
+        ('nav2_call', 'nav2 submission failed'),
+        ('nav2_future', 'nav2 goal submission failed'),
+    ],
+)
+def test_submission_exception_aborts_with_structured_failure(
+    failing_boundary,
+    expected_message,
+):
+    nav_handle = FakeAcceptedNav2Goal(
+        ImmediateFuture(
+            SimpleNamespace(
+                status=GoalStatus.STATUS_SUCCEEDED,
+                result=NavigateToPose.Result(),
+            )
+        )
+    )
+    adapter, goal_handle = make_unit_adapter(nav_handle)
+    if failing_boundary == 'resolver_call':
+        adapter._resolver.call_async.side_effect = RuntimeError(
+            'resolver submission failed'
+        )
+    elif failing_boundary == 'resolver_future':
+        adapter._resolver.call_async.return_value = ImmediateFuture(
+            error=RuntimeError('resolver future failed')
+        )
+    elif failing_boundary == 'nav2_call':
+        adapter._nav2.send_goal_async.side_effect = RuntimeError(
+            'Nav2 submission failed'
+        )
+    else:
+        adapter._nav2.send_goal_async.return_value = ImmediateFuture(
+            error=RuntimeError('Nav2 future failed')
+        )
+
+    result = adapter._execute(goal_handle)
+
+    assert result.outcome == NavigateToNamedLocation.Result.OUTCOME_FAILED
+    assert expected_message in result.message.lower()
+    assert result.message
+    assert nav_handle.cancel_calls == 0
+    goal_handle.abort.assert_called_once_with()
+    goal_handle.succeed.assert_not_called()
+    assert adapter._goal_reserved is False
+    assert adapter.shutdown_complete()
+
+
+def test_nav2_aborted_status_cannot_use_default_success_payload():
+    wrapped_result = SimpleNamespace(
+        status=GoalStatus.STATUS_ABORTED,
+        result=NavigateToPose.Result(),
+    )
+    nav_handle = FakeAcceptedNav2Goal(ImmediateFuture(wrapped_result))
+    adapter, goal_handle = make_unit_adapter(nav_handle)
+
+    result = adapter._execute(goal_handle)
+
+    assert result.outcome != NavigateToNamedLocation.Result.OUTCOME_SUCCEEDED
+    assert result.outcome == NavigateToNamedLocation.Result.OUTCOME_UNREACHABLE
+    assert result.message
+    goal_handle.abort.assert_called_once_with()
+    goal_handle.succeed.assert_not_called()
+    assert nav_handle.cancel_calls == 0
+    assert adapter._goal_reserved is False
+    assert adapter.shutdown_complete()
 
 
 def test_shutdown_cancels_active_nav2_and_becomes_idle(monkeypatch, tmp_path):
@@ -210,6 +479,67 @@ def test_shutdown_cancels_active_nav2_and_becomes_idle(monkeypatch, tmp_path):
         ):
             wait_future(goal_handle.cancel_goal_async())
             wait_future(result_future)
+        executor.shutdown()
+        spin_thread.join(timeout=2.0)
+        dependencies.nav2_server.destroy()
+        for node in (adapter, dependencies, client_node):
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+def test_client_cancel_confirms_nav2_stop_before_reporting_cancelled(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    monkeypatch.setenv('ROS_DOMAIN_ID', '173')
+    monkeypatch.setenv('ROS_AUTOMATIC_DISCOVERY_RANGE', 'LOCALHOST')
+    rclpy.init()
+    adapter = NamedNavigationAdapter()
+    dependencies = FakeNavigationDependencies(block_navigation=True)
+    client_node = rclpy.create_node('named_navigation_cancel_client')
+    client = ActionClient(
+        client_node,
+        NavigateToNamedLocation,
+        '/buddy/navigation/navigate_to_named_location',
+    )
+    executor = MultiThreadedExecutor(num_threads=6)
+    for node in (adapter, dependencies, client_node):
+        executor.add_node(node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    result_future = None
+    try:
+        assert client.wait_for_server(timeout_sec=2.0)
+        precondition_deadline = time.monotonic() + 2.0
+        while time.monotonic() < precondition_deadline:
+            dependencies.publish_preconditions()
+            if adapter._safety is not None and adapter._localization_available():
+                break
+            time.sleep(0.05)
+        goal = NavigateToNamedLocation.Goal()
+        goal.location_name = 'kitchen'
+        goal_handle = wait_future(client.send_goal_async(goal))
+        assert goal_handle.accepted
+        result_future = goal_handle.get_result_async()
+        assert dependencies.navigation_started.wait(2.0)
+
+        cancel_response = wait_future(goal_handle.cancel_goal_async())
+        assert cancel_response.goals_canceling
+        wrapped_result = wait_future(result_future)
+
+        assert wrapped_result.status == GoalStatus.STATUS_CANCELED
+        assert wrapped_result.result.outcome == (
+            NavigateToNamedLocation.Result.OUTCOME_CANCELLED
+        )
+        assert 'Nav2 cancellation and stopped state confirmed' in (
+            wrapped_result.result.message
+        )
+        assert dependencies.navigation_cancelled.is_set()
+        assert adapter._goal_reserved is False
+        assert adapter.shutdown_complete()
+    finally:
         executor.shutdown()
         spin_thread.join(timeout=2.0)
         dependencies.nav2_server.destroy()

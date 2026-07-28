@@ -8,6 +8,7 @@ from buddy_interfaces.action import Speak
 from builtin_interfaces.msg import Duration
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from .providers import FakeTextToSpeechProvider, SpeechSynthesisError, TextToSpeechProvider
@@ -115,9 +116,14 @@ def _duration_message(seconds: float) -> Duration:
 def main(args: list[str] | None = None) -> None:
     """Run the local mock-backed Speak action server."""
     rclpy.init(args=args)
-    node = BuddySpeakNode()
+    node = None
     try:
+        node = BuddySpeakNode()
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

@@ -7,6 +7,7 @@ import uuid
 from buddy_interfaces.msg import EmergencyStopRequest, RecognizedUtterance
 from builtin_interfaces.msg import Time
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
@@ -106,9 +107,14 @@ class BuddyVoiceNode(Node):
 def main(args: list[str] | None = None) -> None:
     """Run the local push-to-talk voice input node."""
     rclpy.init(args=args)
-    node = BuddyVoiceNode()
+    node = None
     try:
+        node = BuddyVoiceNode()
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

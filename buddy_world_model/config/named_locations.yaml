@@ -1,0 +1,12 @@
+frame_id: map
+locations:
+  - name: home
+    description: Configurable initial navigation reference.
+    enabled: true
+    position: {x: 0.0, y: 0.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  - name: kitchen
+    description: Example semantic destination for the smoke-test map.
+    enabled: true
+    position: {x: 2.0, y: 0.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

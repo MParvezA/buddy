@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>buddy_world_model</name>
+  <version>0.1.0</version>
+  <description>Bounded semantic named-location and world-summary service for Buddy.</description>
+  <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>buddy_interfaces</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>ament_pyflakes</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

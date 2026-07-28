@@ -15,6 +15,12 @@ required_joints = {'left_wheel_joint', 'right_wheel_joint'}
 assert required_links <= links, required_links - links
 assert required_joints <= joints, required_joints - joints
 assert len(root.findall(".//inertial")) >= 4
+footprint_joint = root.find("joint[@name='base_footprint_joint']")
+assert footprint_joint.find('parent').attrib['link'] == 'base_link'
+assert footprint_joint.find('child').attrib['link'] == 'base_footprint'
+joint_children = [joint.find('child').attrib['link'] for joint in root.findall('joint')]
+assert len(joint_children) == len(set(joint_children))
+assert 'base_link' not in joint_children
 
 # Sensor links are positioned by their fixed joint; visual geometry is local.
 for sensor_link in ('lidar_link', 'imu_link', 'camera_link'):
@@ -32,6 +38,13 @@ if sdf_paths:
     parity_joints = {'base_footprint_joint', 'left_wheel_joint', 'right_wheel_joint', 'caster_joint'}
     assert parity_joints <= joints
     assert parity_joints <= sdf_joints
+    sdf_footprint_joint = sdf_model.find("joint[@name='base_footprint_joint']")
+    assert sdf_footprint_joint.findtext('parent') == 'base_link'
+    assert sdf_footprint_joint.findtext('child') == 'base_footprint'
+    sdf_joint_children = [
+        joint.findtext('child') for joint in sdf_model.findall('joint')]
+    assert len(sdf_joint_children) == len(set(sdf_joint_children))
+    assert 'base_link' not in sdf_joint_children
 
     def wheel_radius_urdf(link_name):
         return float(root.find(f"link[@name='{link_name}']/visual/geometry/cylinder").attrib['radius'])

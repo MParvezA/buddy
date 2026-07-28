@@ -3,6 +3,7 @@ import ast
 from pathlib import Path
 import unittest
 import xml.etree.ElementTree as ET
+import yaml
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -34,17 +35,35 @@ class TestModel(unittest.TestCase):
         drive = model.find("plugin[@name='gz::sim::systems::DiffDrive']")
         self.assertEqual(drive.findtext('frame_id'), 'odom')
         self.assertEqual(drive.findtext('child_frame_id'), 'base_link')
+        watchdog = model.find("plugin[@name='buddy_gazebo::CommandWatchdog']")
+        self.assertIsNotNone(watchdog)
+        self.assertEqual(
+            watchdog.findtext('input_topic'), '/model/buddy/watchdog/input')
+        self.assertEqual(
+            watchdog.findtext('output_topic'), '/model/buddy/watchdog/output')
+        self.assertEqual(float(watchdog.findtext('timeout')), 0.25)
+        self.assertEqual(
+            drive.findtext('topic'), '/model/buddy/watchdog/output')
 
     def test_bridge_keeps_frozen_sensor_topics(self):
-        bridge = (PACKAGE / 'config' / 'bridge.yaml').read_text()
+        bridge_path = PACKAGE / 'config' / 'bridge.yaml'
+        bridge = bridge_path.read_text()
         for topic in ('/clock', '/joint_states', '/odom/wheel', '/scan', '/imu/data_raw',
                       '/camera/image_raw', '/camera/camera_info'):
             self.assertIn(topic, bridge)
+        odom_bridge = next(
+            entry for entry in yaml.safe_load(bridge_path.read_text())
+            if entry['ros_topic_name'] == '/odom/wheel')
+        self.assertEqual(odom_bridge['qos_profile'], 'SENSOR_DATA')
+        self.assertEqual(odom_bridge['publisher_queue'], 10)
 
     def test_adapter_declares_sim_time_and_restricts_drive_axes(self):
         adapter = (PACKAGE / 'buddy_gazebo' / 'safe_cmd_vel_adapter.py').read_text()
         self.assertIn("has_parameter('use_sim_time')", adapter)
         self.assertIn("declare_parameter('use_sim_time', False)", adapter)
+        self.assertIn(
+            "self.declare_parameter('gz_topic', '/model/buddy/watchdog/input')",
+            adapter)
         self.assertIn('message.linear.x = command.twist.linear.x', adapter)
         self.assertIn('message.angular.z = command.twist.angular.z', adapter)
         for forbidden_axis in ('message.linear.y =', 'message.linear.z =',
@@ -80,3 +99,7 @@ class TestModel(unittest.TestCase):
             )
         ]
         self.assertEqual(len(guarded_shutdowns), 1)
+
+
+if __name__ == '__main__':
+    unittest.main()

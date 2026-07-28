@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """The sole ROS-to-Gazebo motion boundary for the native Harmonic drive."""
 from gz.msgs10.twist_pb2 import Twist
 from gz.transport13 import Node as GzNode
@@ -17,7 +18,7 @@ class SafeCommandAdapter(Node):
         # fallback for runtimes that do not, without redeclaring it on Jazzy.
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', False)
-        self.declare_parameter('gz_topic', '/model/buddy/cmd_vel')
+        self.declare_parameter('gz_topic', '/model/buddy/watchdog/input')
         self._gz_node = GzNode()
         self._publisher = self._gz_node.advertise(
             self.get_parameter('gz_topic').value, Twist)
@@ -48,3 +49,7 @@ def main() -> None:
                 rclpy.shutdown()
         except (KeyboardInterrupt, ExternalShutdownException):
             pass
+
+
+if __name__ == '__main__':
+    main()

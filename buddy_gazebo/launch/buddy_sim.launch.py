@@ -2,9 +2,14 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    Command,
+    EnvironmentVariable,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+)
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
+from launch_ros.substitutions import FindPackagePrefix, FindPackageShare
 
 
 def generate_launch_description():
@@ -15,6 +20,10 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         SetEnvironmentVariable('GZ_SIM_RESOURCE_PATH', PathJoinSubstitution([gazebo_share, 'models'])),
+        SetEnvironmentVariable(
+            'GZ_SIM_SYSTEM_PLUGIN_PATH',
+            [PathJoinSubstitution([FindPackagePrefix('buddy_gazebo'), 'lib']), ':',
+             EnvironmentVariable('GZ_SIM_SYSTEM_PLUGIN_PATH', default_value='')]),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(PathJoinSubstitution([
             FindPackageShare('ros_gz_sim'), 'launch', 'gz_sim.launch.py'])),
             launch_arguments={'gz_args': ['-r -s ', world]}.items()),

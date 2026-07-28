@@ -62,6 +62,11 @@ SafetyCore::SafetyCore(const SafetyConfig & config, const std::int64_t start_ste
   {
     throw std::invalid_argument("obstacle front arc must be in (0, 2*pi]");
   }
+  if (!finite_positive(config_.obstacle_rear_arc_radians) ||
+    config_.obstacle_rear_arc_radians > 2.0 * kPi)
+  {
+    throw std::invalid_argument("obstacle rear arc must be in (0, 2*pi]");
+  }
   if (config_.command_timeout_ns <= 0 || config_.scan_timeout_ns <= 0 ||
     config_.controller_diagnostics_timeout_ns <= 0 ||
     config_.future_tolerance_ns < 0 || config_.startup_inhibit_ns < 0)
@@ -111,7 +116,9 @@ bool SafetyCore::submit_scan(
   scan_received_steady_ns_ = now_steady_ns;
   last_scan_stamp_ = scan.header.stamp;
   last_scan_valid_ = false;
-  nearest_obstacle_ = std::numeric_limits<double>::infinity();
+  nearest_front_obstacle_ = std::numeric_limits<double>::infinity();
+  nearest_rear_obstacle_ = std::numeric_limits<double>::infinity();
+  nearest_obstacle_all_around_ = std::numeric_limits<double>::infinity();
 
   if (!CommandArbiterCore::valid_stamp(
       scan.header.stamp, now_ros_ns, config_.scan_timeout_ns, config_.future_tolerance_ns))
@@ -122,8 +129,10 @@ bool SafetyCore::submit_scan(
     return false;
   }
   if (scan.ranges.empty() || !std::isfinite(scan.angle_min) ||
+    !std::isfinite(scan.angle_max) || scan.angle_max < scan.angle_min ||
     !finite_positive(scan.angle_increment) || !std::isfinite(scan.range_min) ||
-    !finite_positive(scan.range_max) || scan.range_max <= scan.range_min)
+    scan.range_min < 0.0F || !finite_positive(scan.range_max) ||
+    scan.range_max <= scan.range_min)
   {
     if (rejection_reason != nullptr) {
       *rejection_reason = "scan geometry or range bounds are invalid";
@@ -131,28 +140,61 @@ bool SafetyCore::submit_scan(
     return false;
   }
 
-  const double half_arc = config_.obstacle_front_arc_radians / 2.0;
-  bool monitored_sample_seen = false;
+  const double expected_angle_max = static_cast<double>(scan.angle_min) +
+    static_cast<double>(scan.ranges.size() - 1U) *
+    static_cast<double>(scan.angle_increment);
+  const double angle_tolerance =
+    std::max(1.0e-6, static_cast<double>(scan.angle_increment));
+  if (std::abs(expected_angle_max - static_cast<double>(scan.angle_max)) >
+    angle_tolerance)
+  {
+    if (rejection_reason != nullptr) {
+      *rejection_reason = "scan angle bounds do not match its sample count";
+    }
+    return false;
+  }
+
+  const double front_half_arc = config_.obstacle_front_arc_radians / 2.0;
+  const double rear_half_arc = config_.obstacle_rear_arc_radians / 2.0;
+  bool front_sample_seen = false;
+  bool rear_sample_seen = false;
   for (std::size_t index = 0; index < scan.ranges.size(); ++index) {
     const double angle = static_cast<double>(scan.angle_min) +
       static_cast<double>(index) * static_cast<double>(scan.angle_increment);
     const double normalized_angle = std::atan2(std::sin(angle), std::cos(angle));
-    if (std::abs(normalized_angle) > half_arc) {
+    const double rear_relative_angle = std::atan2(
+      std::sin(normalized_angle - kPi), std::cos(normalized_angle - kPi));
+    const bool in_front_arc = std::abs(normalized_angle) <= front_half_arc;
+    const bool in_rear_arc = std::abs(rear_relative_angle) <= rear_half_arc;
+
+    const double range = static_cast<double>(scan.ranges[index]);
+    const bool clear_sample = std::isinf(range) && range > 0.0;
+    const bool obstacle_sample =
+      std::isfinite(range) && range >= scan.range_min && range <= scan.range_max;
+    if (!clear_sample && !obstacle_sample) {
       continue;
     }
 
-    const double range = static_cast<double>(scan.ranges[index]);
-    if (std::isinf(range) && range > 0.0) {
-      monitored_sample_seen = true;
-    } else if (std::isfinite(range) && range >= scan.range_min && range <= scan.range_max) {
-      monitored_sample_seen = true;
-      nearest_obstacle_ = std::min(nearest_obstacle_, range);
+    if (obstacle_sample) {
+      nearest_obstacle_all_around_ = std::min(nearest_obstacle_all_around_, range);
+    }
+    if (in_front_arc) {
+      front_sample_seen = true;
+      if (obstacle_sample) {
+        nearest_front_obstacle_ = std::min(nearest_front_obstacle_, range);
+      }
+    }
+    if (in_rear_arc) {
+      rear_sample_seen = true;
+      if (obstacle_sample) {
+        nearest_rear_obstacle_ = std::min(nearest_rear_obstacle_, range);
+      }
     }
   }
 
-  if (!monitored_sample_seen) {
+  if (!front_sample_seen || !rear_sample_seen) {
     if (rejection_reason != nullptr) {
-      *rejection_reason = "scan has no valid samples in the configured front arc";
+      *rejection_reason = "scan has insufficient valid front or rear arc coverage";
     }
     return false;
   }
@@ -271,9 +313,24 @@ SafetyDecision SafetyCore::evaluate(
       "command_watchdog", "arbitrated command is missing or stale");
   }
 
+  const bool requests_forward = command_.twist.linear.x > 0.0;
+  const bool requests_reverse = command_.twist.linear.x < 0.0;
+  const bool currently_forward = last_linear_output_ > 0.0;
+  const bool currently_reverse = last_linear_output_ < 0.0;
+  const bool requests_rotation = command_.twist.angular.z != 0.0;
+  const bool currently_rotating = last_angular_output_ != 0.0;
+  const bool directional_stop =
+    ((requests_forward || currently_forward) &&
+    nearest_front_obstacle_ <= config_.obstacle_stop_distance) ||
+    ((requests_reverse || currently_reverse) &&
+    nearest_rear_obstacle_ <= config_.obstacle_stop_distance);
+  const bool rotation_stop =
+    (requests_rotation || currently_rotating) &&
+    nearest_obstacle_all_around_ <= config_.obstacle_stop_distance;
   const bool obstacle_stops =
-    nearest_obstacle_ <= config_.obstacle_stop_distance &&
-    (config_.obstacle_stop_all_motion || command_.twist.linear.x > 0.0);
+    directional_stop || rotation_stop ||
+    (config_.obstacle_stop_all_motion &&
+    nearest_obstacle_all_around_ <= config_.obstacle_stop_distance);
   if (obstacle_stops) {
     return stopped(
       now_ros_ns, now_steady_ns, buddy_interfaces::msg::SafetyState::STATE_SOFT_STOPPED,
@@ -289,15 +346,29 @@ SafetyDecision SafetyCore::evaluate(
     desired_linear != command_.twist.linear.x || desired_angular != command_.twist.angular.z;
   bool obstacle_limited = false;
 
-  if (desired_linear > 0.0 && nearest_obstacle_ < config_.obstacle_slowdown_distance) {
-    const double scale = std::clamp(
-      (nearest_obstacle_ - config_.obstacle_stop_distance) /
-      (config_.obstacle_slowdown_distance - config_.obstacle_stop_distance),
+  const auto obstacle_scale = [this](const double distance) {
+      return std::clamp(
+        (distance - config_.obstacle_stop_distance) /
+        (config_.obstacle_slowdown_distance - config_.obstacle_stop_distance),
       0.0, 1.0);
-    desired_linear *= scale;
-    if (config_.obstacle_scale_angular) {
-      desired_angular *= scale;
-    }
+    };
+  const double front_scale = obstacle_scale(nearest_front_obstacle_);
+  const double rear_scale = obstacle_scale(nearest_rear_obstacle_);
+  const double rotation_scale = obstacle_scale(nearest_obstacle_all_around_);
+
+  if (desired_linear > 0.0 && front_scale < 1.0) {
+    desired_linear *= front_scale;
+    limited = true;
+    obstacle_limited = true;
+  } else if (desired_linear < 0.0 && rear_scale < 1.0) {
+    desired_linear *= rear_scale;
+    limited = true;
+    obstacle_limited = true;
+  }
+  if (desired_angular != 0.0 && config_.obstacle_scale_angular &&
+    rotation_scale < 1.0)
+  {
+    desired_angular *= rotation_scale;
     limited = true;
     obstacle_limited = true;
   }
@@ -306,12 +377,23 @@ SafetyDecision SafetyCore::evaluate(
     0, now_steady_ns - last_evaluation_steady_ns_);
   const double elapsed_seconds =
     static_cast<double>(elapsed_ns) / static_cast<double>(kNanosecondsPerSecond);
-  const double linear_output = approach(
+  const double approached_linear_output = approach(
     last_linear_output_, desired_linear,
     config_.max_linear_acceleration * elapsed_seconds);
-  const double angular_output = approach(
+  const double front_linear_limit = config_.max_linear_velocity * front_scale;
+  const double rear_linear_limit = config_.max_linear_velocity * rear_scale;
+  const double linear_output = std::clamp(
+    approached_linear_output, -rear_linear_limit, front_linear_limit);
+  const double approached_angular_output = approach(
     last_angular_output_, desired_angular,
     config_.max_angular_acceleration * elapsed_seconds);
+  const double angular_limit = config_.obstacle_scale_angular ?
+    config_.max_angular_velocity * rotation_scale : config_.max_angular_velocity;
+  const double angular_output = std::clamp(
+    approached_angular_output, -angular_limit, angular_limit);
+  obstacle_limited = obstacle_limited ||
+    linear_output != approached_linear_output ||
+    angular_output != approached_angular_output;
   limited = limited || linear_output != desired_linear || angular_output != desired_angular;
 
   last_linear_output_ = linear_output;

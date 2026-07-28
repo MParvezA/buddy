@@ -50,6 +50,8 @@ SafetyFilterNode::SafetyFilterNode(const rclcpp::NodeOptions & options)
     "obstacle_slowdown_distance", config.obstacle_slowdown_distance);
   config.obstacle_front_arc_radians =
     declare_parameter<double>("obstacle_front_arc_degrees", 60.0) * kDegreesToRadians;
+  config.obstacle_rear_arc_radians =
+    declare_parameter<double>("obstacle_rear_arc_degrees", 60.0) * kDegreesToRadians;
   config.obstacle_stop_all_motion =
     declare_parameter<bool>("obstacle_stop_all_motion", config.obstacle_stop_all_motion);
   config.obstacle_scale_angular =

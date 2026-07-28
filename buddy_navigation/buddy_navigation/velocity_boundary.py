@@ -1,5 +1,7 @@
 """Publish Nav2's private stamped velocity with the frozen motion-request QoS."""
 
+import math
+
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import TwistStamped
@@ -16,7 +18,7 @@ ACTION_STATUS_TOPIC = (
     '/buddy/navigation/navigate_to_named_location/_action/status'
 )
 DIAGNOSTICS_TOPIC = '/diagnostics'
-OWNER_LIVENESS_TIMEOUT_SEC = 0.5
+OWNER_LIVENESS_TIMEOUT_SEC = 0.2
 MAX_LIVENESS_CHECK_PERIOD_SEC = 0.05
 
 
@@ -46,8 +48,13 @@ class VelocityBoundary(Node):
         self._owner_liveness_timeout_sec = float(
             self.get_parameter('owner_liveness_timeout_sec').value
         )
-        if self._owner_liveness_timeout_sec <= 0.0:
-            raise ValueError('owner_liveness_timeout_sec must be positive')
+        if (
+            not math.isfinite(self._owner_liveness_timeout_sec)
+            or self._owner_liveness_timeout_sec <= 0.0
+        ):
+            raise ValueError(
+                'owner_liveness_timeout_sec must be finite and positive'
+            )
         self._action_executing = False
         self._last_owner_evidence_ns = None
         self._owner_liveness_clock = Clock(clock_type=ClockType.STEADY_TIME)

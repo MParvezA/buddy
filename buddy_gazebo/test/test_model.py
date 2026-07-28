@@ -1,4 +1,5 @@
 """Fast structural checks for the native Harmonic assets."""
+import ast
 from pathlib import Path
 import unittest
 import xml.etree.ElementTree as ET
@@ -36,3 +37,33 @@ class TestModel(unittest.TestCase):
         for forbidden_axis in ('message.linear.y =', 'message.linear.z =',
                                'message.angular.x =', 'message.angular.y ='):
             self.assertNotIn(forbidden_axis, adapter)
+
+    def test_adapter_teardown_catches_only_normal_shutdown(self):
+        adapter = (PACKAGE / 'buddy_gazebo' / 'safe_cmd_vel_adapter.py').read_text()
+        tree = ast.parse(adapter)
+        handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+        self.assertEqual(len(handlers), 2)
+        for handler in handlers:
+            caught = handler.type
+            self.assertIsInstance(caught, ast.Tuple)
+            self.assertEqual(
+                {element.id for element in caught.elts},
+                {'KeyboardInterrupt', 'ExternalShutdownException'})
+        guarded_shutdowns = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Attribute)
+            and isinstance(node.test.func.value, ast.Name)
+            and node.test.func.value.id == 'rclpy'
+            and node.test.func.attr == 'ok'
+            and any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == 'rclpy'
+                and child.func.attr == 'shutdown'
+                for child in ast.walk(node)
+            )
+        ]
+        self.assertEqual(len(guarded_shutdowns), 1)

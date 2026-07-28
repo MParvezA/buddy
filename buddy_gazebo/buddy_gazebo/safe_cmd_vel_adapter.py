@@ -3,6 +3,7 @@ from gz.msgs10.twist_pb2 import Twist
 from gz.transport13 import Node as GzNode
 import rclpy
 from geometry_msgs.msg import TwistStamped
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
@@ -33,9 +34,17 @@ class SafeCommandAdapter(Node):
 
 def main() -> None:
     rclpy.init()
-    node = SafeCommandAdapter()
+    node = None
     try:
+        node = SafeCommandAdapter()
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if node is not None:
+                node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        except (KeyboardInterrupt, ExternalShutdownException):
+            pass

@@ -33,13 +33,6 @@ export interface CompletedWorkItem {
   threadId: string;
 }
 
-export interface ReportPreview {
-  scheduledFor: string;
-  timezone: string;
-  facts: string[];
-  generatedInterpretation: string;
-}
-
 export interface DashboardSnapshot {
   mode: "representative";
   date: string;
@@ -52,5 +45,4 @@ export interface DashboardSnapshot {
   };
   activeThreads: WorkThread[];
   recentlyCompleted: CompletedWorkItem[];
-  reportPreview: ReportPreview;
 }

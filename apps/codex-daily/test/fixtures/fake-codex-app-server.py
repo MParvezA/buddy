@@ -5,6 +5,7 @@ import threading
 import sys
 
 initialized = False
+reporting_thread_created = False
 
 
 def thread(thread_id, **overrides):
@@ -169,11 +170,14 @@ for line in sys.stdin:
                 }
             )
         elif not params.get("cursor"):
+            data = [thread("thread-one")]
+            if reporting_thread_created:
+                data.append(thread("codex-daily-reporting-thread"))
             send(
                 {
                     "id": message["id"],
                     "result": {
-                        "data": [thread("thread-one")],
+                        "data": data,
                         "nextCursor": "page-two",
                         "backwardsCursor": None,
                     },
@@ -222,5 +226,68 @@ for line in sys.stdin:
                 },
             }
         )
+    elif method == "thread/start":
+        reporting_thread_created = True
+        # Deliberately notify before resolving thread/start. Codex Daily must
+        # never project this thread before it can be durably excluded.
+        send(
+            {
+                "method": "thread/started",
+                "params": {"thread": thread("codex-daily-reporting-thread")},
+            }
+        )
+        threading.Timer(
+            0.05,
+            lambda request_id=message["id"]: send(
+                {
+                    "id": request_id,
+                    "result": {"thread": thread("codex-daily-reporting-thread")},
+                }
+            ),
+        ).start()
+    elif method == "turn/start":
+        reporting_thread_id = message["params"]["threadId"]
+        send(
+            {
+                "id": message["id"],
+                "result": {
+                    "turn": {
+                        "id": "reporting-turn",
+                        "status": "inProgress",
+                        "items": [],
+                    }
+                },
+            }
+        )
+        prompt = json.dumps(message["params"].get("input", []))
+        if "NO_COMPLETION" not in prompt:
+            threading.Timer(
+                0.01,
+                lambda completed_thread_id=reporting_thread_id: send(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "threadId": completed_thread_id,
+                            "turn": {
+                                "id": "reporting-turn",
+                                "status": "completed",
+                                "items": [
+                                    {
+                                        "id": "reporting-message",
+                                        "type": "agentMessage",
+                                        "text": json.dumps(
+                                            {
+                                                "text": "Generated summary from the dedicated reporting thread.",
+                                                "suggestions": [],
+                                            },
+                                            separators=(",", ":"),
+                                        ),
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                ),
+            ).start()
     else:
         send({"id": message.get("id"), "error": {"code": -32601, "message": "unsupported"}})

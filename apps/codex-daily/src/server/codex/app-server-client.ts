@@ -101,6 +101,16 @@ export class AppServerClient extends EventEmitter {
     return this.requestRaw(method, params);
   }
 
+  requestReporting(
+    method: "thread/start" | "turn/start",
+    params: unknown,
+  ): Promise<unknown> {
+    if (!this.initialized) {
+      return Promise.reject(new Error("Codex App Server is not initialized."));
+    }
+    return this.requestRaw(method, params);
+  }
+
   async stop(): Promise<void> {
     this.stopping = true;
     this.initialized = false;

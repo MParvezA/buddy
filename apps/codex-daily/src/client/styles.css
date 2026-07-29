@@ -435,6 +435,99 @@ h3 {
   gap: 18px;
 }
 
+.report-detail-stack,
+.report-history {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.report-fact-sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.report-fact-sections h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.report-fact-sections ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-soft);
+}
+
+.muted-copy {
+  margin: 0;
+  color: var(--text-faint);
+}
+
+.generated-suggestion {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(194, 168, 232, 0.25);
+}
+
+.generated-suggestion p {
+  margin: 6px 0;
+}
+
+.report-history-card {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.report-history-card:hover {
+  border-color: var(--border-strong);
+}
+
+.report-history-card h2 {
+  margin: 4px 0 8px;
+}
+
+.report-history-card p {
+  color: var(--text-soft);
+}
+
+.report-history-card small {
+  color: var(--text-faint);
+}
+
+.report-settings {
+  display: grid;
+  max-width: 680px;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.report-settings label {
+  display: grid;
+  gap: 7px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.report-settings input[type="time"],
+.report-settings input[type="text"],
+.report-settings input:not([type]) {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.report-settings .check-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
 .panel {
   min-width: 0;
   padding: clamp(18px, 2.6vw, 28px);

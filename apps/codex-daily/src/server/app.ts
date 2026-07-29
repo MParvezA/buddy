@@ -13,6 +13,15 @@ import type { ProcessFactory } from "./codex/app-server-client.js";
 import { registerPlanningRoutes } from "./planning/planning-routes.js";
 import { PlanningService } from "./planning/planning-service.js";
 import { representativeDay } from "./representative-day.js";
+import { registerReportRoutes } from "./reports/report-routes.js";
+import { ReportRepository } from "./reports/report-repository.js";
+import { ReportScheduler } from "./reports/report-scheduler.js";
+import {
+  ReportService,
+  type ReportNarrativeProvider,
+} from "./reports/report-service.js";
+import { ReportingThreadNarrativeProvider } from "./reports/reporting-thread.js";
+import { ObserverReportingGateway } from "./reports/observer-reporting-gateway.js";
 import { openDatabase } from "./storage/database.js";
 import { ObserverRepository } from "./storage/observer-repository.js";
 import { PlanningRepository } from "./storage/planning-repository.js";
@@ -31,9 +40,13 @@ export interface BuildAppOptions {
   processFactory?: ProcessFactory;
   observerInventoryIntervalMs?: number;
   observerRequestTimeoutMs?: number;
+  reportingTurnTimeoutMs?: number;
   observerReconnectBaseMs?: number;
   observerReconnectMaxMs?: number;
   attentionSweepIntervalMs?: number;
+  reportNarrativeProvider?: ReportNarrativeProvider;
+  reportSetTimer?: typeof setTimeout;
+  reportClearTimer?: typeof clearTimeout;
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -57,6 +70,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     clock: options.clock,
     inventoryIntervalMs: options.observerInventoryIntervalMs,
     requestTimeoutMs: options.observerRequestTimeoutMs,
+    reportingTurnTimeoutMs: options.reportingTurnTimeoutMs,
     reconnectBaseMs: options.observerReconnectBaseMs,
     reconnectMaxMs: options.observerReconnectMaxMs,
   });
@@ -66,7 +80,22 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     clock: options.clock,
     sweepIntervalMs: options.attentionSweepIntervalMs,
   });
+  const reportRepository = new ReportRepository(database.connection);
+  const reports = new ReportService(
+    reportRepository,
+    options.clock,
+    options.reportNarrativeProvider ??
+      new ReportingThreadNarrativeProvider(new ObserverReportingGateway(observer)),
+  );
+  const reportScheduler = new ReportScheduler({
+    service: reports,
+    repository: reportRepository,
+    clock: options.clock,
+    setTimer: options.reportSetTimer,
+    clearTimer: options.reportClearTimer,
+  });
   app.addHook("onClose", async () => {
+    reportScheduler.stop();
     attention.stop();
     await observer.stop();
     database.close();
@@ -87,7 +116,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   await registerPlanningRoutes(app, planning);
   await registerObserverRoutes(app, observer);
   await registerAttentionRoutes(app, attention);
+  await registerReportRoutes(app, reports, reportScheduler);
   attention.start();
+  await reportScheduler.start();
   if (options.observer ?? process.env.NODE_ENV !== "test") {
     void observer.start();
   }

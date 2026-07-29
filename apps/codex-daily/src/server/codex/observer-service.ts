@@ -26,6 +26,7 @@ export interface ObserverServiceOptions {
   clock?: () => Date;
   inventoryIntervalMs?: number;
   requestTimeoutMs?: number;
+  reportingTurnTimeoutMs?: number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
   random?: () => number;
@@ -35,6 +36,7 @@ export interface ObserverServiceOptions {
 
 export class ObserverUnavailableError extends Error {}
 export class ObserverNotFoundError extends Error {}
+export const DEFAULT_REPORTING_TURN_TIMEOUT_MS = 120_000;
 
 export class ObserverService extends EventEmitter {
   private readonly repository: ObserverRepository;
@@ -44,6 +46,7 @@ export class ObserverService extends EventEmitter {
   private readonly clock: () => Date;
   private readonly inventoryIntervalMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly reportingTurnTimeoutMs: number;
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private readonly random: () => number;
@@ -58,6 +61,9 @@ export class ObserverService extends EventEmitter {
   private eventSequence = 0;
   private diagnosticsIgnored = 0;
   private health: ObserverConnectionHealth;
+  private reportingThreadCreationBuffer: ProtocolMethodEnvelope[] | null = null;
+  private reportingThreadCreation: Promise<string> | null = null;
+  private inventoryCreationTail: Promise<void> = Promise.resolve();
 
   constructor(options: ObserverServiceOptions) {
     super();
@@ -68,6 +74,15 @@ export class ObserverService extends EventEmitter {
     this.clock = options.clock ?? (() => new Date());
     this.inventoryIntervalMs = options.inventoryIntervalMs ?? 15_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 8_000;
+    this.reportingTurnTimeoutMs =
+      options.reportingTurnTimeoutMs ?? DEFAULT_REPORTING_TURN_TIMEOUT_MS;
+    if (
+      !Number.isFinite(this.reportingTurnTimeoutMs) ||
+      this.reportingTurnTimeoutMs <= 0 ||
+      this.reportingTurnTimeoutMs > 600_000
+    ) {
+      throw new Error("Reporting turn timeout must be between 1 and 600000 milliseconds.");
+    }
     this.reconnectBaseMs = options.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = options.reconnectMaxMs ?? 30_000;
     this.random = options.random ?? Math.random;
@@ -142,6 +157,133 @@ export class ObserverService extends EventEmitter {
     };
   }
 
+  async ensureReportingThread(
+    existingThreadId: string | null,
+    register: (threadId: string) => void,
+  ): Promise<string> {
+    if (existingThreadId) {
+      this.repository.exclude(existingThreadId, this.clock().toISOString());
+      register(existingThreadId);
+      return existingThreadId;
+    }
+    if (this.reportingThreadCreation) {
+      const threadId = await this.reportingThreadCreation;
+      register(threadId);
+      return threadId;
+    }
+    const creation = this.createReportingThread(register);
+    this.reportingThreadCreation = creation;
+    try {
+      return await creation;
+    } finally {
+      if (this.reportingThreadCreation === creation) {
+        this.reportingThreadCreation = null;
+      }
+    }
+  }
+
+  private createReportingThread(register: (threadId: string) => void): Promise<string> {
+    return this.withInventoryCreationLock(() =>
+      this.createReportingThreadLocked(register),
+    );
+  }
+
+  private async createReportingThreadLocked(
+    register: (threadId: string) => void,
+  ): Promise<string> {
+    const client = this.connectedClient();
+    this.reportingThreadCreationBuffer = [];
+    try {
+      const result = await client.requestReporting("thread/start", {
+        cwd: process.cwd(),
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        experimentalRawEvents: false,
+      });
+      const value = result as { thread?: { id?: unknown } };
+      const id = value?.thread?.id;
+      if (typeof id !== "string" || !id) {
+        throw new Error("Codex reporting thread creation returned an invalid result.");
+      }
+      // Registration and exclusion happen before buffered App Server
+      // notifications are considered by the ordinary observer.
+      this.repository.exclude(id, this.clock().toISOString());
+      register(id);
+      this.replayReportingCreationBuffer(id);
+      return id;
+    } catch (error) {
+      this.replayReportingCreationBuffer(null);
+      throw error;
+    }
+  }
+
+  async readFinalAssistantMessage(threadId: string): Promise<string | null> {
+    if (this.repository.isExcluded(threadId)) return null;
+    const client = this.connectedClient();
+    const result = await client.request("thread/read", {
+      threadId,
+      includeTurns: true,
+    });
+    const raw = assertThreadReadResponse(result);
+    if (!Array.isArray(raw.turns)) {
+      throw new Error("Codex App Server thread/read response is invalid.");
+    }
+    return finalAssistantText(raw.turns);
+  }
+
+  async runReportingTurn(threadId: string, prompt: string): Promise<string> {
+    if (!this.repository.isExcluded(threadId)) {
+      throw new Error("The reporting thread is not durably excluded.");
+    }
+    const client = this.connectedClient();
+    let cancelCompletion = () => {};
+    const completion = new Promise<string>((resolve, reject) => {
+      const timer = this.setTimer(() => {
+        client.off("message", listener);
+        reject(new Error("Codex reporting turn timed out."));
+      }, this.reportingTurnTimeoutMs);
+      const listener = (envelope: ProtocolMethodEnvelope) => {
+        if (envelope.method !== "turn/completed") return;
+        const params = envelope.params as {
+          threadId?: unknown;
+          thread?: { id?: unknown };
+          turn?: unknown;
+        };
+        if (
+          params?.threadId !== threadId &&
+          params?.thread?.id !== threadId
+        ) {
+          return;
+        }
+        const text = finalAssistantText([params.turn]);
+        if (!text) {
+          this.clearTimer(timer);
+          client.off("message", listener);
+          reject(new Error("Codex reporting turn returned no final assistant message."));
+          return;
+        }
+        this.clearTimer(timer);
+        client.off("message", listener);
+        resolve(text);
+      };
+      cancelCompletion = () => {
+        this.clearTimer(timer);
+        client.off("message", listener);
+      };
+      client.on("message", listener);
+    });
+    try {
+      await client.requestReporting("turn/start", {
+        threadId,
+        input: [{ type: "text", text: prompt }],
+      });
+      return await completion;
+    } catch (error) {
+      cancelCompletion();
+      throw error instanceof Error ? error : new Error("Codex reporting turn failed.");
+    }
+  }
+
   link(taskId: string, threadId: string): "linked" | "missing_task" | "missing_thread" {
     const result = this.repository.link(taskId, threadId, this.clock().toISOString());
     if (result === "linked") this.publish();
@@ -152,6 +294,13 @@ export class ObserverService extends EventEmitter {
     const result = this.repository.unlink(taskId, threadId);
     if (result === "unlinked") this.publish();
     return result;
+  }
+
+  private connectedClient(): AppServerClient {
+    if (!this.client || this.health.state !== "connected") {
+      throw new ObserverUnavailableError("Codex is not connected for reporting.");
+    }
+    return this.client;
   }
 
   private async connect(): Promise<void> {
@@ -178,6 +327,10 @@ export class ObserverService extends EventEmitter {
     client.on("protocolError", disconnect);
     client.on("message", (envelope: ProtocolMethodEnvelope) => {
       try {
+        if (this.reportingThreadCreationBuffer) {
+          this.reportingThreadCreationBuffer.push(envelope);
+          return;
+        }
         this.ingest(envelope);
       } catch (error) {
         disconnect(
@@ -213,7 +366,27 @@ export class ObserverService extends EventEmitter {
     }
   }
 
-  private async refreshInventory(client: AppServerClient): Promise<void> {
+  private replayReportingCreationBuffer(reportingThreadId: string | null): void {
+    const buffered = this.reportingThreadCreationBuffer ?? [];
+    this.reportingThreadCreationBuffer = null;
+    for (const envelope of buffered) {
+      if (
+        reportingThreadId &&
+        protocolThreadId(envelope) === reportingThreadId
+      ) {
+        continue;
+      }
+      this.ingest(envelope);
+    }
+  }
+
+  private refreshInventory(client: AppServerClient): Promise<void> {
+    return this.withInventoryCreationLock(() =>
+      this.refreshInventoryLocked(client),
+    );
+  }
+
+  private async refreshInventoryLocked(client: AppServerClient): Promise<void> {
     for (const archived of [false, true]) {
       let cursor: string | null = null;
       do {
@@ -253,6 +426,20 @@ export class ObserverService extends EventEmitter {
       lastSuccessfulSyncAt: syncedAt,
       lastInventoryRefreshAt: syncedAt,
     };
+  }
+
+  private async withInventoryCreationLock<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.inventoryCreationTail;
+    let release = () => {};
+    this.inventoryCreationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
   }
 
   private ingest(envelope: ProtocolMethodEnvelope): void {
@@ -345,4 +532,60 @@ export class ObserverService extends EventEmitter {
   private publish(): void {
     this.emit("snapshot", this.nextEvent());
   }
+}
+
+function finalAssistantText(values: unknown[]): string | null {
+  const visit = (value: unknown): string | null => {
+    if (!value || typeof value !== "object") return null;
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index -= 1) {
+        const found = visit(value[index]);
+        if (found) return found;
+      }
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    const role = typeof record.role === "string" ? record.role : "";
+    const assistant = role === "assistant" || ["agentMessage", "assistantMessage"].includes(type);
+    if (assistant) {
+      for (const field of ["text", "message"]) {
+        if (typeof record[field] === "string" && record[field]) return record[field] as string;
+      }
+      if (Array.isArray(record.content)) {
+        const text = record.content
+          .filter(
+            (item): item is Record<string, unknown> =>
+              Boolean(item) && typeof item === "object" && !Array.isArray(item),
+          )
+          .map((item) =>
+            typeof item.text === "string" &&
+            ["text", "output_text", "input_text"].includes(String(item.type ?? "text"))
+              ? item.text
+              : "",
+          )
+          .filter(Boolean)
+          .join("\n");
+        if (text) return text;
+      }
+    }
+    for (const field of ["items", "content", "turns", "turn", "result"]) {
+      const found = visit(record[field]);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(values);
+}
+
+function protocolThreadId(envelope: ProtocolMethodEnvelope): string | null {
+  const params = envelope.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return null;
+  const record = params as Record<string, unknown>;
+  if (typeof record.threadId === "string") return record.threadId;
+  if (record.thread && typeof record.thread === "object" && !Array.isArray(record.thread)) {
+    const id = (record.thread as Record<string, unknown>).id;
+    return typeof id === "string" ? id : null;
+  }
+  return null;
 }

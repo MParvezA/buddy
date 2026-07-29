@@ -4,6 +4,9 @@ Codex Daily is a loopback-only daily operations dashboard for organizing work
 across Codex chats. Morning outcomes and deliberate prior-day review decisions
 are stored in local SQLite. The read-only Codex observer stores thread metadata
 and content-free activity facts, never copied chat transcripts.
+At the end of the day it freezes deterministic factual report snapshots from
+the plan, normalized activity, and Needs You state. The default automatic run
+is 18:00 Europe/Berlin; both time and IANA timezone are configurable in Settings.
 
 ## Requirements
 
@@ -42,7 +45,13 @@ Set `CODEX_DAILY_OBSERVER_MODE=shared_live` to use the fixed
 `codex app-server proxy` bridge to an operator-managed App Server daemon. Codex
 Daily does not start, stop, or reconfigure that daemon. `CODEX_DAILY_CODEX_PATH`
 may select a Codex executable path for local testing or an installation outside
-`PATH`; the arguments and read-only protocol methods remain fixed.
+`PATH`; observer arguments and the narrow protocol boundary remain fixed.
+
+Ordinary chats remain read-only. When generated interpretation is explicitly
+enabled, Codex Daily creates one dedicated reporting thread, excludes it from
+monitoring, transiently reads only the final assistant message from linked work
+threads, and starts turns only in that reporting thread. Factual snapshots are
+saved first and remain usable if this optional step fails.
 
 ## Verify
 

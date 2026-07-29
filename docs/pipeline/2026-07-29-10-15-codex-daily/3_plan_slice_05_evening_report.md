@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 05: Evening Report` (this status-bearing commit)
+Verification: `npm run check` passed with 25 files/71 tests; independent Playwright verification passed 11 browser flows with 5 intentional duplicate mobile-flow skips; repository contracts passed 4/4; protected-path diff was empty. Focused coverage proves immutable factual snapshots, exact timezone day bounds, DST gap/overlap policy, durable automatic-run uniqueness, current-day missed recovery, reporting-thread exclusion under adversarial notification/inventory races, bounded narrative timeout/failure/retry, suggestion lifecycle, and content-retention boundaries.
+Deviations: Playwright required sandbox escalation to bind the loopback test server. `npm ci` reported seven existing dependency audit advisories; dependency remediation was not expanded into this slice. Production App Server behavior is covered through the deterministic protocol fake rather than a real-session smoke to avoid unnecessary ordinary-chat content exposure.
+Follow-ups: None. FUP-001 through FUP-006 remain deferred.
 
 ## Context
 

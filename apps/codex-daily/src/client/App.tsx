@@ -9,6 +9,8 @@ import { NotFoundPage } from "./pages/NotFoundPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ThreadDetailPage } from "./pages/ThreadDetailPage";
+import { ReportProvider } from "./data/report-context";
+import { ReportDetailPage } from "./pages/ReportDetailPage";
 
 export function App() {
   return (
@@ -16,15 +18,18 @@ export function App() {
       <ObserverProvider>
         <AttentionProvider>
           <PlanningProvider>
-            <Routes>
-              <Route element={<AppShell />}>
-                <Route index element={<DashboardPage />} />
-                <Route path="threads/:threadId" element={<ThreadDetailPage />} />
-                <Route path="reports" element={<ReportsPage />} />
-                <Route path="settings" element={<SettingsPage />} />
-                <Route path="*" element={<NotFoundPage />} />
-              </Route>
-            </Routes>
+            <ReportProvider>
+              <Routes>
+                <Route element={<AppShell />}>
+                  <Route index element={<DashboardPage />} />
+                  <Route path="threads/:threadId" element={<ThreadDetailPage />} />
+                  <Route path="reports" element={<ReportsPage />} />
+                  <Route path="reports/:snapshotId" element={<ReportDetailPage />} />
+                  <Route path="settings" element={<SettingsPage />} />
+                  <Route path="*" element={<NotFoundPage />} />
+                </Route>
+              </Routes>
+            </ReportProvider>
           </PlanningProvider>
         </AttentionProvider>
       </ObserverProvider>

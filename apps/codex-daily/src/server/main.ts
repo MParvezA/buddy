@@ -19,6 +19,9 @@ const app = await buildApp({
       ? "shared_live"
       : "standalone_history",
   codexExecutable: process.env.CODEX_DAILY_CODEX_PATH,
+  reportingTurnTimeoutMs: process.env.CODEX_DAILY_REPORTING_TURN_TIMEOUT_MS
+    ? Number.parseInt(process.env.CODEX_DAILY_REPORTING_TURN_TIMEOUT_MS, 10)
+    : undefined,
 });
 
 try {

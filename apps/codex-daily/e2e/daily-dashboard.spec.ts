@@ -15,7 +15,7 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
     "Today’s outcomes and progress",
     "Active Codex chats",
     "Recently completed work",
-    "Evening-report preview",
+    "Evening report",
   ]);
 
   const overflow = await page.evaluate(() => ({
@@ -42,11 +42,10 @@ test("built app routes through thread, report, settings, and back to Today", asy
 
   await page.getByRole("link", { name: "Reports" }).click();
   await expect(page.getByRole("heading", { name: "Report history" })).toBeVisible();
-  await expect(page.getByText("No saved reports yet")).toBeVisible();
 
   await page.getByRole("link", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Metadata only" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Metadata and snapshots" })).toBeVisible();
 
   await page.getByRole("link", { name: "Back to Today" }).click();
   await expect(page).toHaveURL("/");

@@ -126,6 +126,38 @@ function mockSuccessfulApi() {
       if (url === "/api/planning") return Promise.resolve(jsonResponse(planning));
       if (url === "/api/observer") return Promise.resolve(jsonResponse(observer));
       if (url === "/api/attention") return Promise.resolve(jsonResponse(attention));
+      if (url === "/api/reports/latest") {
+        return Promise.resolve(
+          jsonResponse({
+            snapshot: null,
+            scheduler: {
+              schedule: {
+                time: "18:00",
+                timezone: "Europe/Berlin",
+                narrativeEnabled: false,
+              },
+              nextRunAt: "2026-07-29T16:00:00.000Z",
+              lastAutomaticRunAt: null,
+              lastFailure: null,
+            },
+          }),
+        );
+      }
+      if (url === "/api/reports") return Promise.resolve(jsonResponse([]));
+      if (url === "/api/report-settings") {
+        return Promise.resolve(
+          jsonResponse({
+            schedule: {
+              time: "18:00",
+              timezone: "Europe/Berlin",
+              narrativeEnabled: false,
+            },
+            nextRunAt: "2026-07-29T16:00:00.000Z",
+            lastAutomaticRunAt: null,
+            lastFailure: null,
+          }),
+        );
+      }
       if (url === "/api/observer/threads/onboarding-refresh") {
         return Promise.resolve(
           jsonResponse({
@@ -172,7 +204,7 @@ describe("daily dashboard", () => {
       "Today’s outcomes and progress",
       "Active Codex chats",
       "Recently completed work",
-      "Evening-report preview",
+      "Evening report",
     ]);
   });
 
@@ -234,7 +266,7 @@ describe("secondary navigation", () => {
 
     await user.click(screen.getByRole("link", { name: "Settings" }));
     expect(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
-    expect(screen.getByText("Metadata only")).toBeVisible();
+    expect(screen.getByText("Metadata and snapshots")).toBeVisible();
 
     await user.click(screen.getByRole("link", { name: "Today" }));
     await user.click(screen.getAllByRole("link", { name: "Onboarding refresh" })[0]);

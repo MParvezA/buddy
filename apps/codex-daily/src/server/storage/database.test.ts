@@ -25,6 +25,7 @@ describe("planning database", () => {
       { version: "001_morning_planning.sql" },
       { version: "002_codex_observer.sql" },
       { version: "003_attention.sql" },
+      { version: "004_evening_report.sql" },
     ]);
     expect(() =>
       database.connection

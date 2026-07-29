@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 from collections import deque
 from dataclasses import dataclass
 import json
@@ -46,6 +47,9 @@ MAX_CHILD_OUTPUT_BYTES = 64 * 1024
 MAX_WHISPER_JSON_BYTES = 1 * 1024 * 1024
 MAX_CAPTURE_WAV_BYTES = MAX_CAPTURE_SECONDS * 16000 * 2 + 4096
 MAX_PIPER_WAV_BYTES = 8 * 1024 * 1024
+# Keeps a single Speak request bounded on the 8 GB local-provider profile while
+# allowing ordinary multi-sentence dialogue in any supported UTF-8 locale.
+MAX_SPEECH_INPUT_UTF8_BYTES = 64 * 1024
 CHILD_ENVIRONMENT_KEYS = (
     'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'XDG_RUNTIME_DIR',
     'DBUS_SESSION_BUS_ADDRESS', 'PIPEWIRE_RUNTIME_DIR', 'PIPEWIRE_REMOTE',
@@ -335,32 +339,32 @@ def _deliver_piper_stdin(
     stdin = child.process.stdin
     if stdin is None:
         raise SpeechSynthesisError('Piper stdin is unavailable')
-    payload = text.encode()
-    offset = 0
     try:
         descriptor = stdin.fileno()
         os.set_blocking(descriptor, False)
-        while offset < len(payload):
-            if cancel_event.is_set():
-                raise SpeechSynthesisCancelled('Piper synthesis cancelled')
-            remaining = deadline_monotonic - time.monotonic()
-            if remaining <= 0.0:
-                raise SpeechSynthesisTimeout('Piper synthesis timed out')
-            try:
-                _, writable, _ = select.select([], [descriptor], [], min(0.05, remaining))
-            except OSError as error:
-                raise SpeechSynthesisError(f'Piper stdin delivery failed: {error}') from error
-            if not writable:
-                continue
-            try:
-                written = os.write(descriptor, payload[offset:offset + 65_536])
-            except (BlockingIOError, InterruptedError):
-                continue
-            except BrokenPipeError as error:
-                raise SpeechSynthesisError('Piper closed stdin before synthesis') from error
-            if written <= 0:
-                raise SpeechSynthesisError('Piper accepted no synthesis input')
-            offset += written
+        for payload in _utf8_chunks(text):
+            offset = 0
+            while offset < len(payload):
+                if cancel_event.is_set():
+                    raise SpeechSynthesisCancelled('Piper synthesis cancelled')
+                remaining = deadline_monotonic - time.monotonic()
+                if remaining <= 0.0:
+                    raise SpeechSynthesisTimeout('Piper synthesis timed out')
+                try:
+                    _, writable, _ = select.select([], [descriptor], [], min(0.05, remaining))
+                except OSError as error:
+                    raise SpeechSynthesisError(f'Piper stdin delivery failed: {error}') from error
+                if not writable:
+                    continue
+                try:
+                    written = os.write(descriptor, payload[offset:offset + 65_536])
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except BrokenPipeError as error:
+                    raise SpeechSynthesisError('Piper closed stdin before synthesis') from error
+                if written <= 0:
+                    raise SpeechSynthesisError('Piper accepted no synthesis input')
+                offset += written
         if cancel_event.is_set():
             raise SpeechSynthesisCancelled('Piper synthesis cancelled')
         if time.monotonic() >= deadline_monotonic:
@@ -372,6 +376,26 @@ def _deliver_piper_stdin(
             stdin.close()
         except BrokenPipeError:
             pass
+
+
+def _utf8_chunks(text: str):
+    """Yield bounded UTF-8 chunks without materializing a complete bytes payload."""
+    encoder = codecs.getincrementalencoder('utf-8')()
+    for offset in range(0, len(text), 4096):
+        yield encoder.encode(text[offset:offset + 4096])
+    final = encoder.encode('', final=True)
+    if final:
+        yield final
+
+
+def _validate_speech_input_size(text: str) -> None:
+    """Reject oversize Speak text before native process creation or byte allocation."""
+    total = 0
+    for chunk in _utf8_chunks(text):
+        total += len(chunk)
+        if total > MAX_SPEECH_INPUT_UTF8_BYTES:
+            raise SpeechSynthesisError(
+                f'speech input exceeds {MAX_SPEECH_INPUT_UTF8_BYTES} UTF-8 bytes')
 
 
 def _pcm_wav_properties(
@@ -387,7 +411,7 @@ def _pcm_wav_properties(
                     reader.getsampwidth(),
                     reader.getcomptype(),
                 )
-    except (wave.Error, OSError, ValueError) as error:
+    except (EOFError, wave.Error, OSError, ValueError) as error:
         raise ValueError(f'not a readable WAV: {error}') from error
     frames, rate, channels, sample_width, compression = properties
     if compression != 'NONE' or not all(value > 0 for value in properties[:4]):
@@ -470,17 +494,16 @@ class PipeWirePushToTalkAudioInput:
         try:
             while process.poll() is None and not release_event.is_set() and time.monotonic() < deadline:
                 release_event.wait(min(0.05, max(0.0, deadline - time.monotonic())))
-            if process.poll() is None:
-                # pw-record finalizes WAV headers on SIGINT; only escalate when
-                # it ignores the graceful stop request.
-                _terminate(process, first_signal=signal.SIGINT)
+            # The direct pw-record leader can exit while descendants retain its
+            # group and output descriptors. Settle the recorded group before
+            # trusting the capture, keeping SIGINT-first WAV finalization.
+            _terminate(process, first_signal=signal.SIGINT)
             _, stderr = _finish(process)
             if not audio_path.exists():
                 raise CaptureError(f'PipeWire capture produced no WAV: {stderr.strip()}')
             _validate_capture_wav(audio_path)
         except Exception:
-            if process.poll() is None:
-                _terminate(process)
+            _terminate(process)
             _remove_owned_directory(directory)
             raise
         capture = AudioCapture(b'', 0, self._locale, audio_path, directory)
@@ -566,6 +589,7 @@ class WhisperCppSpeechToTextProvider:
                     _terminate(process)
                     raise SttError('whisper.cpp transcription timed out')
                 time.sleep(0.01)
+            _terminate(process)
             _, stderr = _finish(process)
             if process.process.returncode != 0:
                 raise SttError(
@@ -583,7 +607,7 @@ class WhisperCppSpeechToTextProvider:
             )
             return [Transcript(text, 1.0, True, locale)]
         finally:
-            if process is not None and process.poll() is None:
+            if process is not None:
                 _terminate(process)
             if process is not None:
                 _finish(process)
@@ -654,6 +678,7 @@ class PiperTextToSpeechProvider:
             self, text: str, voice: str, *, cancel_event: Event,
             deadline_monotonic: float) -> SynthesizedSpeech:
         """Synthesize a temporary WAV, without starting playback."""
+        _validate_speech_input_size(text)
         selected = self._select_voice(text, voice)
         directory = _private_directory(self._temp_directory, 'buddy-piper-')
         wav_path = directory / 'output.wav'
@@ -677,6 +702,7 @@ class PiperTextToSpeechProvider:
                     _terminate(process)
                     raise SpeechSynthesisTimeout('Piper synthesis timed out')
                 time.sleep(0.01)
+            _terminate(process)
             _, stderr = _finish(process)
             if process.process.returncode != 0:
                 raise SpeechSynthesisError(
@@ -684,17 +710,17 @@ class PiperTextToSpeechProvider:
             duration = _validate_piper_wav(wav_path)
             return SynthesizedSpeech(duration, wav_path, directory)
         except (SpeechSynthesisCancelled, SpeechSynthesisTimeout, SpeechSynthesisError):
-            if process is not None and process.poll() is None:
+            if process is not None:
                 _terminate(process)
             _remove_owned_directory(directory)
             raise
         except Exception as error:
-            if process is not None and process.poll() is None:
+            if process is not None:
                 _terminate(process)
             _remove_owned_directory(directory)
             raise SpeechSynthesisError(f'Piper synthesis failed: {error}') from error
         finally:
-            if process is not None and process.poll() is None:
+            if process is not None:
                 _terminate(process)
             if process is not None:
                 _finish(process)
@@ -721,13 +747,13 @@ class PiperTextToSpeechProvider:
                     _terminate(process)
                     raise SpeechPlaybackTimeout('PipeWire playback timed out')
                 time.sleep(0.01)
+            _terminate(process)
             _, stderr = _finish(process)
             if process.process.returncode != 0:
                 raise SpeechPlaybackError(
                     f'PipeWire playback exited with {process.process.returncode}: {stderr.strip()}')
         finally:
-            if process.poll() is None:
-                _terminate(process)
+            _terminate(process)
             _finish(process)
 
     def cleanup(self, speech: SynthesizedSpeech) -> None:

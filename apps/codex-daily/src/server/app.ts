@@ -29,10 +29,8 @@ import { PrivacyService } from "./privacy/privacy-service.js";
 import { registerPrivacyRoutes } from "./privacy/privacy-routes.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics-service.js";
 import { SessionBriefRepository } from "./briefs/session-brief-repository.js";
-import {
-  PlaceholderBriefAnalyzer,
-  type SessionBriefAnalyzer,
-} from "./briefs/placeholder-brief-analyzer.js";
+import type { SessionBriefAnalyzer } from "./briefs/session-brief-analyzer.js";
+import { SessionBriefGateway } from "./briefs/session-brief-gateway.js";
 import { SessionBriefService } from "./briefs/session-brief-service.js";
 import { registerSessionBriefRoutes } from "./briefs/session-brief-routes.js";
 
@@ -61,6 +59,9 @@ export interface BuildAppOptions {
   version?: string;
   sessionBriefAnalyzer?: SessionBriefAnalyzer;
   sessionBriefRetentionIntervalMs?: number;
+  sessionBriefDebounceMs?: number;
+  sessionBriefRetryDelaysMs?: readonly [number, number];
+  sessionBriefTurnTimeoutMs?: number;
 }
 
 function loopbackRequestAllowed(hostHeader: string | undefined, originHeader: string | undefined) {
@@ -127,9 +128,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const sessionBriefs = new SessionBriefService({
     repository: new SessionBriefRepository(database.connection),
     observer,
-    analyzer: options.sessionBriefAnalyzer ?? new PlaceholderBriefAnalyzer(),
+    analyzer:
+      options.sessionBriefAnalyzer ??
+      new SessionBriefGateway(observer, options.sessionBriefTurnTimeoutMs),
     clock: options.clock,
     retentionIntervalMs: options.sessionBriefRetentionIntervalMs,
+    debounceMs: options.sessionBriefDebounceMs,
+    retryDelaysMs: options.sessionBriefRetryDelaysMs,
   });
   const attention = new AttentionService({
     repository: new AttentionRepository(database.connection),

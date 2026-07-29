@@ -49,15 +49,15 @@ function setup() {
 
 const result = {
   content: {
-    currentState: "Session metadata is ready for future GPT-5.6 analysis.",
-    done: [],
-    operatorActions: [],
+    currentState: "The chat is preparing a release.",
+    done: ["The chat reports the foundation is ready."],
+    operatorActions: ["Review the release checklist."],
     blockers: [],
-    confidence: "low" as const,
-    evidence: [],
+    confidence: "high" as const,
+    evidence: ["user:first-intent"],
   },
-  generator: "deterministic_placeholder",
-  modelId: null,
+  generator: "codex_app_server" as const,
+  modelId: "gpt-5.6-sol" as const,
 };
 
 describe("session brief repository", () => {
@@ -69,16 +69,24 @@ describe("session brief repository", () => {
       "automatic",
       "2026-07-29T10:01:00.000Z",
     )!;
-    expect(
-      repository.enqueue(
+    const manual = repository.enqueue(
         "thread-one",
         first.targetUpdatedAt,
         "manual",
         "2026-07-29T10:02:00.000Z",
         true,
+      )!;
+    expect(manual.jobId).not.toBe(first.jobId);
+    expect(
+      repository.enqueue(
+        "thread-one",
+        first.targetUpdatedAt,
+        "manual",
+        "2026-07-29T10:02:01.000Z",
+        true,
       )?.jobId,
-    ).toBe(first.jobId);
-    repository.markAnalyzing(first.jobId, "2026-07-29T10:03:00.000Z");
+    ).toBe(manual.jobId);
+    repository.markAnalyzing(manual.jobId, "2026-07-29T10:03:00.000Z");
     expect(
       repository.promote(
         "obsolete",
@@ -86,15 +94,17 @@ describe("session brief repository", () => {
         first.targetUpdatedAt,
         result,
         "2026-07-29T10:04:00.000Z",
+        0,
       ),
     ).toBe(false);
     expect(
       repository.promote(
-        first.jobId,
+        manual.jobId,
         "thread-one",
         first.targetUpdatedAt,
         result,
         "2026-07-29T10:04:00.000Z",
+        0,
       ),
     ).toBe(true);
     expect(
@@ -103,9 +113,8 @@ describe("session brief repository", () => {
       analysisStatus: "ready",
       freshness: "current",
       lastGood: {
-        generator: "deterministic_placeholder",
-        modelId: null,
-        done: [],
+        generator: "codex_app_server",
+        modelId: "gpt-5.6-sol",
       },
     });
 
@@ -116,10 +125,52 @@ describe("session brief repository", () => {
       "2026-07-29T10:05:00.000Z",
       true,
     )!;
-    expect(refresh.jobId).not.toBe(first.jobId);
+    expect(refresh.jobId).not.toBe(manual.jobId);
     expect(
       repository.item("thread-one", first.targetUpdatedAt, first.targetUpdatedAt),
     ).toMatchObject({ analysisStatus: "queued", freshness: "current" });
+    repository.markAnalyzing(refresh.jobId, "2026-07-29T10:06:00.000Z");
+    expect(
+      repository.item("thread-one", first.targetUpdatedAt, first.targetUpdatedAt),
+    ).toMatchObject({ analysisStatus: "analyzing", freshness: "current" });
+  });
+
+  it("rejects promotion when the durable coordinator epoch was invalidated", () => {
+    const { repository } = setup();
+    const job = repository.enqueue(
+      "thread-one",
+      "2026-07-29T10:00:00.000Z",
+      "automatic",
+      "2026-07-29T10:01:00.000Z",
+    )!;
+    repository.markAnalyzing(job.jobId, "2026-07-29T10:02:00.000Z");
+    expect(repository.currentCoordinatorEpoch()).toBe(0);
+    expect(repository.advanceCoordinatorEpoch()).toBe(1);
+    expect(
+      repository.promote(
+        job.jobId,
+        job.threadId,
+        job.targetUpdatedAt,
+        result,
+        "2026-07-29T10:03:00.000Z",
+        0,
+      ),
+    ).toBe(false);
+    expect(repository.listBriefRowsForExport()).toEqual([]);
+    expect(repository.findJob(job.threadId)).toMatchObject({
+      jobId: job.jobId,
+      status: "analyzing",
+    });
+    expect(
+      repository.promote(
+        job.jobId,
+        job.threadId,
+        job.targetUpdatedAt,
+        result,
+        "2026-07-29T10:04:00.000Z",
+        1,
+      ),
+    ).toBe(true);
   });
 
   it("recovers work, preserves a stable grace marker, prunes, and cascades", () => {
@@ -144,6 +195,7 @@ describe("session brief repository", () => {
       job.targetUpdatedAt,
       result,
       "2026-07-29T10:05:00.000Z",
+      0,
     );
     repository.reconcileWindow([], "2026-07-29T11:00:00.000Z", "2026-07-28T11:00:00.000Z");
     repository.reconcileWindow([], "2026-07-29T12:00:00.000Z", "2026-07-28T12:00:00.000Z");

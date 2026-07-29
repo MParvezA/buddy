@@ -34,6 +34,7 @@ describe("planning database", () => {
       { version: "004_evening_report.sql" },
       { version: "005_operational_hardening.sql" },
       { version: "006_session_briefs.sql" },
+      { version: "007_gpt_session_briefs.sql" },
     ]);
     expect(() =>
       database.connection
@@ -82,7 +83,7 @@ describe("planning database", () => {
     expect(migration).not.toMatch(/\b(transcript|prompt|response|credential)\b/i);
   });
 
-  it("upgrades an existing version-five database with session briefs", () => {
+  it("upgrades Slice 01 storage and removes placeholder rows and jobs once", () => {
     const directory = mkdtempSync(path.join(tmpdir(), "codex-daily-upgrade-"));
     directories.push(directory);
     const migrations = path.join(directory, "migrations");
@@ -93,6 +94,7 @@ describe("planning database", () => {
       "003_attention.sql",
       "004_evening_report.sql",
       "005_operational_hardening.sql",
+      "006_session_briefs.sql",
     ]) {
       copyFileSync(
         path.resolve("src/server/storage/migrations", name),
@@ -104,6 +106,37 @@ describe("planning database", () => {
       path: databasePath,
       migrationsDirectory: migrations,
     });
+    previous.connection.exec(`
+      INSERT INTO observed_threads(
+        id, session_id, title, cwd, source, cli_version, created_at, updated_at,
+        recency_at, archived, last_observed_at, runtime, waiting_on_approval,
+        waiting_on_user_input, last_activity_at
+      ) VALUES (
+        'thread-one', 'session-one', 'Chat', '/workspace', 'cli', '1',
+        '2026-07-29T10:00:00.000Z', '2026-07-29T10:00:00.000Z',
+        '2026-07-29T10:00:00.000Z', 0, '2026-07-29T10:00:00.000Z',
+        'idle', 0, 0, NULL
+      );
+      INSERT INTO session_briefs(
+        thread_id, source_updated_at, generated_at, generator, model_id,
+        current_state, done_json, operator_actions_json, blockers_json,
+        confidence, evidence_json, updated_at, out_of_window_at
+      ) VALUES (
+        'thread-one', '2026-07-29T10:00:00.000Z',
+        '2026-07-29T10:01:00.000Z', 'deterministic_placeholder', NULL,
+        'Session metadata is ready for future GPT-5.6 analysis.',
+        '[]', '[]', '[]', 'low', '[]',
+        '2026-07-29T10:01:00.000Z', NULL
+      );
+      INSERT INTO session_brief_jobs(
+        thread_id, job_id, target_updated_at, reason, status, attempt_count,
+        queued_at, started_at, failure_category, failure_at, updated_at
+      ) VALUES (
+        'thread-one', 'placeholder-job', '2026-07-29T10:00:00.000Z',
+        'automatic', 'queued', 0, '2026-07-29T10:02:00.000Z',
+        NULL, NULL, NULL, '2026-07-29T10:02:00.000Z'
+      );
+    `);
     previous.close();
 
     const upgraded = openDatabase({ path: databasePath });
@@ -111,7 +144,7 @@ describe("planning database", () => {
       upgraded.connection
         .prepare("SELECT MAX(version) AS version FROM schema_migrations")
         .get(),
-    ).toEqual({ version: "006_session_briefs.sql" });
+    ).toEqual({ version: "007_gpt_session_briefs.sql" });
     expect(
       upgraded.connection
         .prepare(`
@@ -125,6 +158,16 @@ describe("planning database", () => {
       { name: "session_briefs" },
     ]);
     expect(upgraded.connection.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(
+      upgraded.connection
+        .prepare("SELECT COUNT(*) AS count FROM session_briefs")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      upgraded.connection
+        .prepare("SELECT COUNT(*) AS count FROM session_brief_jobs")
+        .get(),
+    ).toEqual({ count: 0 });
     upgraded.close();
   });
 

@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 02: GPT-5.6 Background Analysis` (this status-bearing commit)
+Verification: `npm run check` passed with 40 files/145 tests; focused brief coverage passed 8 files/43 tests; focused Codex/report regressions passed 10 files/38 tests; privacy/runtime coverage passed 4 files/8 tests; full Playwright passed 16 runnable flows with 6 intentional mobile duplicate-flow skips; repository contracts passed 4/4; `colcon list` remained 16; protected-path and whitespace checks were clean. Deterministic integration proves the exact GPT-5.6 Sol/medium/ephemeral/no-fallback/no-tools/no-environment payload, 32,000-code-point bound, exact thread/turn correlation, retries, supersession, durable promotion epoch, and content-leak prevention.
+Deviations: Playwright required host-context execution after the sandboxed `tsx` IPC socket failed with `EPERM`. The active coordinator epoch is stored in a singleton SQLite row added by migration 007 and checked inside the same `BEGIN IMMEDIATE` promotion transaction; this uses the existing job token and timestamps without adding a parallel job-history model.
+Follow-ups: None. `FUP-001` through `FUP-005` remain deferred.
 
 ## Context
 

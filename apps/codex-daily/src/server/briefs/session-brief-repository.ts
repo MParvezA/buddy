@@ -100,6 +100,38 @@ export class SessionBriefRepository {
     private readonly createId: () => string = randomUUID,
   ) {}
 
+  advanceCoordinatorEpoch(): number {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`
+          UPDATE session_brief_coordinator_state
+          SET epoch = epoch + 1
+          WHERE singleton_id = 1
+        `)
+        .run();
+      const epoch = this.currentCoordinatorEpoch();
+      this.db.exec("COMMIT");
+      return epoch;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  currentCoordinatorEpoch(): number {
+    const row = this.db
+      .prepare(`
+        SELECT epoch FROM session_brief_coordinator_state
+        WHERE singleton_id = 1
+      `)
+      .get() as { epoch: number } | undefined;
+    if (!row || !Number.isSafeInteger(row.epoch) || row.epoch < 0) {
+      throw new Error("Session brief coordinator epoch is invalid.");
+    }
+    return row.epoch;
+  }
+
   recoverAnalyzing(now: string): number {
     return Number(
       this.db
@@ -123,7 +155,8 @@ export class SessionBriefRepository {
     if (
       current &&
       current.targetUpdatedAt === targetUpdatedAt &&
-      (current.status === "queued" || current.status === "analyzing")
+      (current.status === "queued" || current.status === "analyzing") &&
+      (!force || current.reason === "manual")
     ) {
       return current;
     }
@@ -164,17 +197,27 @@ export class SessionBriefRepository {
     return row ? mapJob(row) : null;
   }
 
-  nextQueued(): SessionBriefJob | null {
+  listDueQueued(now: string): SessionBriefJob[] {
+    return (
+      this.db
+        .prepare(`
+          SELECT * FROM session_brief_jobs
+          WHERE status = 'queued' AND queued_at <= ?
+        `)
+        .all(now) as unknown as JobRow[]
+    ).map(mapJob);
+  }
+
+  nextQueuedAt(): string | null {
     const row = this.db
       .prepare(`
-        SELECT * FROM session_brief_jobs
+        SELECT queued_at FROM session_brief_jobs
         WHERE status = 'queued'
-        ORDER BY CASE reason WHEN 'manual' THEN 0 WHEN 'retry' THEN 1 ELSE 2 END,
-                 queued_at, thread_id
+        ORDER BY queued_at, thread_id
         LIMIT 1
       `)
-      .get() as unknown as JobRow | undefined;
-    return row ? mapJob(row) : null;
+      .get() as { queued_at: string } | undefined;
+    return row?.queued_at ?? null;
   }
 
   markAnalyzing(jobId: string, now: string): SessionBriefJob | null {
@@ -206,11 +249,63 @@ export class SessionBriefRepository {
         UPDATE session_brief_jobs
         SET status = ?, failure_category = ?, failure_at = ?, started_at = NULL,
             updated_at = ?
-        WHERE job_id = ?
+        WHERE job_id = ? AND status = 'analyzing'
       `)
           .run(status, category, now, now, jobId).changes,
       ) > 0
     );
+  }
+
+  scheduleRetry(
+    jobId: string,
+    category: SessionBriefFailureCategory,
+    failureAt: string,
+    dueAt: string,
+  ): boolean {
+    return Number(
+      this.db
+        .prepare(`
+          UPDATE session_brief_jobs
+          SET reason = 'retry', status = 'queued', queued_at = ?,
+              started_at = NULL, failure_category = ?, failure_at = ?,
+              updated_at = ?
+          WHERE job_id = ? AND status = 'analyzing'
+        `)
+        .run(dueAt, category, failureAt, failureAt, jobId).changes,
+    ) > 0;
+  }
+
+  deletePlaceholderArtifacts(): number {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(`
+          DELETE FROM session_brief_jobs
+          WHERE thread_id IN (
+            SELECT thread_id FROM session_briefs
+            WHERE generator = 'deterministic_placeholder'
+          )
+        `)
+        .run();
+      const removed = Number(
+        this.db
+          .prepare(
+            "DELETE FROM session_briefs WHERE generator = 'deterministic_placeholder'",
+          )
+          .run().changes,
+      );
+      this.db
+        .prepare(`
+          DELETE FROM session_brief_jobs
+          WHERE thread_id NOT IN (SELECT id FROM observed_threads)
+        `)
+        .run();
+      this.db.exec("COMMIT");
+      return removed;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   promote(
@@ -223,6 +318,7 @@ export class SessionBriefRepository {
       modelId: string | null;
     },
     now: string,
+    expectedCoordinatorEpoch: number,
   ): boolean {
     const content = assertSessionBriefContent(result.content);
     const stored = assertSessionBriefLastGood({
@@ -234,6 +330,12 @@ export class SessionBriefRepository {
     });
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const activeEpoch = this.db
+        .prepare(`
+          SELECT 1 FROM session_brief_coordinator_state
+          WHERE singleton_id = 1 AND epoch = ?
+        `)
+        .get(expectedCoordinatorEpoch);
       const current = this.db
         .prepare(`
           SELECT 1 FROM session_brief_jobs
@@ -241,7 +343,7 @@ export class SessionBriefRepository {
             AND status = 'analyzing'
         `)
         .get(threadId, jobId, targetUpdatedAt);
-      if (!current) {
+      if (!activeEpoch || !current) {
         this.db.exec("ROLLBACK");
         return false;
       }

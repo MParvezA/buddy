@@ -43,4 +43,32 @@ describe("AppServerClient", () => {
       "malformed envelope",
     );
   });
+
+  it("detaches an aborted request and ignores its late response ID", async () => {
+    const client = new AppServerClient({
+      executable: fixture,
+      args: ["app-server", "--stdio"],
+      requestTimeoutMs: 2_000,
+    });
+    await client.start();
+    const controller = new AbortController();
+    const request = client.requestInternal(
+      "thread/start",
+      {
+        model: "gpt-5.6-sol",
+        ephemeral: true,
+      },
+      controller.signal,
+    );
+    controller.abort();
+    await expect(request).rejects.toThrow("unavailable");
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    await expect(
+      client.request("thread/list", {
+        sourceKinds: ["cli"],
+        archived: false,
+      }),
+    ).resolves.toMatchObject({ nextCursor: "page-two" });
+    await client.stop();
+  });
 });

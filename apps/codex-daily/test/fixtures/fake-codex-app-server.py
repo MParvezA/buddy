@@ -7,6 +7,8 @@ import os
 
 initialized = False
 reporting_thread_created = False
+analysis_thread_count = 0
+analysis_threads = set()
 
 
 def thread(thread_id, **overrides):
@@ -44,6 +46,8 @@ def send(value):
 
 shared_live = "proxy" in sys.argv
 method_log = os.environ.get("CODEX_DAILY_FAKE_METHOD_LOG")
+request_log = os.environ.get("CODEX_DAILY_FAKE_REQUEST_LOG")
+analysis_mode = os.environ.get("CODEX_DAILY_FAKE_ANALYSIS_MODE", "success")
 
 
 def live_fact():
@@ -149,6 +153,9 @@ for line in sys.stdin:
     if method_log and method:
         with open(method_log, "a", encoding="utf-8") as handle:
             handle.write(method + "\n")
+    if request_log and method in {"thread/read", "thread/start", "turn/start"}:
+        with open(request_log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(message, separators=(",", ":")) + "\n")
     if method == "initialize":
         send(
             {
@@ -208,17 +215,38 @@ for line in sys.stdin:
             )
             threading.Timer(0.01, live_fact).start()
     elif method == "thread/read":
+        source_thread_id = message["params"]["threadId"]
         send(
             {
                 "id": message["id"],
                 "result": {
                     "thread": thread(
-                        message["params"]["threadId"],
+                        source_thread_id,
                         turns=[
                             {
-                                "id": "turn-secret",
+                                "id": "turn-intent",
                                 "status": "completed",
                                 "items": [
+                                    {
+                                        "id": "user-secret",
+                                        "type": "userMessage",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "SYNTHETIC_SOURCE_SECRET plan the release",
+                                            },
+                                            {
+                                                "type": "localImage",
+                                                "path": "/secret/unsupported.png",
+                                            },
+                                        ],
+                                        "token": "STRUCTURED_TOKEN_MUST_DROP",
+                                    },
+                                    {
+                                        "id": "reasoning-secret",
+                                        "type": "reasoning",
+                                        "summary": "SYNTHETIC_REASONING_SECRET",
+                                    },
                                     {
                                         "id": "message-secret",
                                         "type": "agentMessage",
@@ -232,32 +260,55 @@ for line in sys.stdin:
             }
         )
     elif method == "thread/start":
-        reporting_thread_created = True
+        params = message.get("params", {})
+        is_analysis = params.get("ephemeral") is True
+        if is_analysis and analysis_mode == "unavailable":
+            send({"id": message["id"], "error": {"code": -32000, "message": "model unavailable"}})
+            continue
+        if is_analysis:
+            analysis_thread_count += 1
+            created_thread_id = f"codex-daily-analysis-{analysis_thread_count}"
+            analysis_threads.add(created_thread_id)
+        else:
+            reporting_thread_created = True
+            created_thread_id = "codex-daily-reporting-thread"
         # Deliberately notify before resolving thread/start. Codex Daily must
         # never project this thread before it can be durably excluded.
         send(
             {
                 "method": "thread/started",
-                "params": {"thread": thread("codex-daily-reporting-thread")},
+                "params": {
+                    "thread": thread(
+                        created_thread_id,
+                        ephemeral=is_analysis,
+                        source="appServer",
+                    )
+                },
             }
         )
         threading.Timer(
             0.05,
-            lambda request_id=message["id"]: send(
+            lambda request_id=message["id"], thread_id=created_thread_id: send(
                 {
                     "id": request_id,
-                    "result": {"thread": thread("codex-daily-reporting-thread")},
+                    "result": {"thread": thread(thread_id)},
                 }
             ),
         ).start()
     elif method == "turn/start":
         reporting_thread_id = message["params"]["threadId"]
+        is_analysis = reporting_thread_id in analysis_threads
+        turn_id = (
+            f"analysis-turn-{reporting_thread_id}"
+            if is_analysis
+            else "reporting-turn"
+        )
         send(
             {
                 "id": message["id"],
                 "result": {
                     "turn": {
-                        "id": "reporting-turn",
+                        "id": turn_id,
                         "status": "inProgress",
                         "items": [],
                     }
@@ -265,28 +316,66 @@ for line in sys.stdin:
             }
         )
         prompt = json.dumps(message["params"].get("input", []))
-        if "NO_COMPLETION" not in prompt:
+        if is_analysis:
+            # A crossed completion must never satisfy exact turn correlation.
+            send(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": reporting_thread_id,
+                        "turn": {
+                            "id": "wrong-analysis-turn",
+                            "status": "completed",
+                            "items": [
+                                {
+                                    "type": "agentMessage",
+                                    "text": '{"currentState":"WRONG TURN"}',
+                                }
+                            ],
+                        },
+                    },
+                }
+            )
+        if "NO_COMPLETION" not in prompt and analysis_mode != "slow":
+            if is_analysis and analysis_mode == "invalid":
+                response_text = "```json\n{\"raw\":\"SYNTHETIC_RAW_OUTPUT_SECRET\"}\n```"
+            elif is_analysis and analysis_mode == "refusal":
+                response_text = None
+            elif is_analysis:
+                response_text = json.dumps(
+                    {
+                        "currentState": "The chat is organizing the release.",
+                        "done": ["The chat reports the monitor foundation is ready."],
+                        "operatorActions": ["Review the pending release checklist."],
+                        "blockers": [],
+                        "confidence": "high",
+                        "evidence": ["user:first-intent", "assistant:recent-1"],
+                    },
+                    separators=(",", ":"),
+                )
+            else:
+                response_text = json.dumps(
+                    {
+                        "text": "Generated summary from the dedicated reporting thread.",
+                        "suggestions": [],
+                    },
+                    separators=(",", ":"),
+                )
             threading.Timer(
                 0.01,
-                lambda completed_thread_id=reporting_thread_id: send(
+                lambda completed_thread_id=reporting_thread_id, completed_turn_id=turn_id, final_text=response_text: send(
                     {
                         "method": "turn/completed",
                         "params": {
                             "threadId": completed_thread_id,
                             "turn": {
-                                "id": "reporting-turn",
+                                "id": completed_turn_id,
                                 "status": "completed",
-                                "items": [
+                                "items": [] if final_text is None else [
                                     {
                                         "id": "reporting-message",
                                         "type": "agentMessage",
-                                        "text": json.dumps(
-                                            {
-                                                "text": "Generated summary from the dedicated reporting thread.",
-                                                "suggestions": [],
-                                            },
-                                            separators=(",", ":"),
-                                        ),
+                                        "text": final_text,
                                     }
                                 ],
                             },

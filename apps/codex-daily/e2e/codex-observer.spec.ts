@@ -33,7 +33,15 @@ test("observer discovers paginated chats, links a task, and reads detail transie
   expect(briefsResponse.ok()).toBe(true);
   expect(briefsResponse.headers()["cache-control"]).toBe("no-store");
   const briefsBody = await briefsResponse.text();
-  expect(briefsBody).toContain("deterministic_placeholder");
+  expect(JSON.parse(briefsBody)).toMatchObject({
+    total: 2,
+    queued: 2,
+    items: [
+      expect.objectContaining({ analysisStatus: "queued", lastGood: null }),
+      expect.objectContaining({ analysisStatus: "queued", lastGood: null }),
+    ],
+  });
+  expect(briefsBody).not.toContain("deterministic_placeholder");
   expect(briefsBody).not.toMatch(
     /SECRET RESPONSE|SECRET PREVIEW|rawProtocol|prompt|reasoning|turns/,
   );
@@ -53,6 +61,10 @@ test("observer discovers paginated chats, links a task, and reads detail transie
         });
       }),
   );
-  expect(liveBrief).toContain("deterministic_placeholder");
+  expect(JSON.parse(liveBrief)).toMatchObject({
+    total: 2,
+    queued: 2,
+  });
+  expect(liveBrief).not.toContain("deterministic_placeholder");
   expect(liveBrief).not.toMatch(/SECRET RESPONSE|SECRET PREVIEW|prompt|reasoning|turns/);
 });

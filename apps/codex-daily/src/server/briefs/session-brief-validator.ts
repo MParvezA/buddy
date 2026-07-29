@@ -10,9 +10,6 @@ const HTML_MARKUP = /<\/?[A-Za-z][^>]*>/;
 const CREDENTIAL_URL = /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i;
 const EVIDENCE = /^(user|assistant):(first-intent|recent-[1-6])$/;
 const CONFIDENCE = new Set<SessionBriefConfidence>(["high", "medium", "low"]);
-export const PLACEHOLDER_CURRENT_STATE =
-  "Session metadata is ready for future GPT-5.6 analysis.";
-
 function isExactObject(
   value: unknown,
   keys: readonly string[],
@@ -26,7 +23,7 @@ function isExactObject(
 function safeText(value: unknown, maximum: number, name: string): string {
   if (typeof value !== "string") throw new Error(`${name} must be text.`);
   const text = value.trim();
-  if (!text || text.length > maximum) {
+  if (!text || Array.from(text).length > maximum) {
     throw new Error(`${name} has an invalid length.`);
   }
   if (
@@ -49,13 +46,17 @@ function safeList(
   if (!Array.isArray(value) || value.length > maximumItems) {
     throw new Error(`${name} has an invalid item count.`);
   }
-  return value.map((item, index) => {
+  const result = value.map((item, index) => {
     const text = safeText(item, maximumCharacters, `${name}[${index}]`);
     if (grammar && !grammar.test(text)) {
       throw new Error(`${name}[${index}] has an invalid format.`);
     }
     return text;
   });
+  if (new Set(result).size !== result.length) {
+    throw new Error(`${name} contains duplicate items.`);
+  }
+  return result;
 }
 
 export function assertSessionBriefContent(value: unknown): SessionBriefContent {
@@ -129,18 +130,10 @@ export function assertSessionBriefLastGood(
       value.modelId === null ? null : safeText(value.modelId, 100, "modelId"),
   };
   if (
-    stored.generator === "deterministic_placeholder" &&
-    (
-      stored.modelId !== null ||
-      stored.currentState !== PLACEHOLDER_CURRENT_STATE ||
-      stored.confidence !== "low" ||
-      stored.done.length > 0 ||
-      stored.operatorActions.length > 0 ||
-      stored.blockers.length > 0 ||
-      stored.evidence.length > 0
-    )
+    stored.generator !== "codex_app_server" ||
+    stored.modelId !== "gpt-5.6-sol"
   ) {
-    throw new Error("Deterministic placeholder provenance is invalid.");
+    throw new Error("Session brief provenance is invalid.");
   }
   return stored;
 }

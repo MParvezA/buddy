@@ -24,6 +24,15 @@ interface PendingCall {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+}
+
+export class AppServerRequestError extends Error {
+  constructor(readonly category: "unavailable" | "rejected") {
+    super(`Codex App Server request failed (${category}).`);
+    this.name = "AppServerRequestError";
+  }
 }
 
 const defaultProcessFactory: ProcessFactory = (executable, args) =>
@@ -94,21 +103,26 @@ export class AppServerClient extends EventEmitter {
     this.initialized = true;
   }
 
-  request(method: "thread/list" | "thread/read", params: unknown): Promise<unknown> {
-    if (!this.initialized) {
-      return Promise.reject(new Error("Codex App Server is not initialized."));
-    }
-    return this.requestRaw(method, params);
-  }
-
-  requestReporting(
-    method: "thread/start" | "turn/start",
+  request(
+    method: "thread/list" | "thread/read",
     params: unknown,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (!this.initialized) {
       return Promise.reject(new Error("Codex App Server is not initialized."));
     }
-    return this.requestRaw(method, params);
+    return this.requestRaw(method, params, signal);
+  }
+
+  requestInternal(
+    method: "thread/start" | "turn/start",
+    params: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (!this.initialized) {
+      return Promise.reject(new Error("Codex App Server is not initialized."));
+    }
+    return this.requestRaw(method, params, signal);
   }
 
   async stop(): Promise<void> {
@@ -131,19 +145,38 @@ export class AppServerClient extends EventEmitter {
     });
   }
 
-  private requestRaw(method: string, params: unknown): Promise<unknown> {
+  private requestRaw(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const id = this.nextRequestId++;
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new AppServerRequestError("unavailable"));
+        return;
+      }
       const timer = this.setTimer(() => {
-        this.pending.delete(id);
-        reject(new Error(`Codex App Server ${method} request timed out.`));
+        const current = this.pending.get(id);
+        if (!current) return;
+        this.deletePending(id, current);
+        reject(new AppServerRequestError("unavailable"));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const pending: PendingCall = { resolve, reject, timer, signal };
+      if (signal) {
+        pending.abortListener = () => {
+          const current = this.pending.get(id);
+          if (!current) return;
+          this.deletePending(id, current);
+          reject(new AppServerRequestError("unavailable"));
+        };
+        signal.addEventListener("abort", pending.abortListener, { once: true });
+      }
+      this.pending.set(id, pending);
       try {
         this.sendEnvelope({ id, method, params });
       } catch (error) {
-        this.clearTimer(timer);
-        this.pending.delete(id);
+        this.deletePending(id, pending);
         reject(error instanceof Error ? error : new Error("Codex App Server stdin failed."));
       }
     });
@@ -182,10 +215,9 @@ export class AppServerClient extends EventEmitter {
   private onResponse(response: ProtocolResponse): void {
     const pending = this.pending.get(response.id);
     if (!pending) return;
-    this.pending.delete(response.id);
-    this.clearTimer(pending.timer);
+    this.deletePending(response.id, pending);
     if (response.error) {
-      pending.reject(new Error("Codex App Server rejected a read-only request."));
+      pending.reject(new AppServerRequestError("rejected"));
     } else {
       pending.resolve(response.result);
     }
@@ -200,10 +232,17 @@ export class AppServerClient extends EventEmitter {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) {
-      this.clearTimer(pending.timer);
+    for (const [id, pending] of this.pending) {
+      this.deletePending(id, pending);
       pending.reject(error);
     }
-    this.pending.clear();
+  }
+
+  private deletePending(id: string | number, pending: PendingCall): void {
+    this.pending.delete(id);
+    this.clearTimer(pending.timer);
+    if (pending.signal && pending.abortListener) {
+      pending.signal.removeEventListener("abort", pending.abortListener);
+    }
   }
 }

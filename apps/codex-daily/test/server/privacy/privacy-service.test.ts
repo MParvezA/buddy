@@ -102,18 +102,18 @@ describe("local monitor privacy operations", () => {
       briefJob.targetUpdatedAt,
       {
         content: {
-          currentState:
-            "Session metadata is ready for future GPT-5.6 analysis.",
-          done: [],
-          operatorActions: [],
+          currentState: "The chat is preparing a release.",
+          done: ["The chat reports the plan is ready."],
+          operatorActions: ["Review the release plan."],
           blockers: [],
-          confidence: "low",
-          evidence: [],
+          confidence: "high",
+          evidence: ["user:first-intent"],
         },
-        generator: "deterministic_placeholder",
-        modelId: null,
+        generator: "codex_app_server",
+        modelId: "gpt-5.6-sol",
       },
       "2026-07-29T10:05:00.000Z",
+      0,
     );
     value.observer.addActivity({
       sourceKey: "turn:thread-one:turn-one:completed",
@@ -161,8 +161,8 @@ describe("local monitor privacy operations", () => {
         {
           threadId: "thread-one",
           lastGood: {
-            generator: "deterministic_placeholder",
-            modelId: null,
+            generator: "codex_app_server",
+            modelId: "gpt-5.6-sol",
           },
         },
       ],
@@ -195,7 +195,7 @@ describe("local monitor privacy operations", () => {
     ]);
     expect(value.privacy.databaseHealth()).toMatchObject({
       status: "ok",
-      schemaVersion: "006_session_briefs.sql",
+      schemaVersion: "007_gpt_session_briefs.sql",
       foreignKeyViolations: 0,
     });
   });
@@ -243,18 +243,18 @@ describe("local monitor privacy operations", () => {
       dayBrief.targetUpdatedAt,
       {
         content: {
-          currentState:
-            "Session metadata is ready for future GPT-5.6 analysis.",
-          done: [],
-          operatorActions: [],
+          currentState: "The chat is preparing a release.",
+          done: ["The chat reports the plan is ready."],
+          operatorActions: ["Review the release plan."],
           blockers: [],
-          confidence: "low",
-          evidence: [],
+          confidence: "high",
+          evidence: ["user:first-intent"],
         },
-        generator: "deterministic_placeholder",
-        modelId: null,
+        generator: "codex_app_server",
+        modelId: "gpt-5.6-sol",
       },
       "2026-07-29T01:02:00.000Z",
+      0,
     );
     value.observer.addActivity({
       sourceKey: "activity-in-berlin-day",

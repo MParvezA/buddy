@@ -37,7 +37,7 @@ describe("session brief validation", () => {
     expect(() => assertSessionBriefContent(value)).toThrow(message);
   });
 
-  it("requires visibly non-GPT, non-claiming placeholder provenance", () => {
+  it("accepts only the canonical GPT-5.6 App Server provenance", () => {
     expect(() =>
       assertSessionBriefLastGood({
         ...valid,
@@ -46,7 +46,7 @@ describe("session brief validation", () => {
         generator: "deterministic_placeholder",
         modelId: null,
       }),
-    ).toThrow("placeholder provenance");
+    ).toThrow("provenance");
     expect(() =>
       assertSessionBriefLastGood({
         currentState:
@@ -61,6 +61,18 @@ describe("session brief validation", () => {
         generator: "deterministic_placeholder",
         modelId: "gpt-5.6-sol",
       }),
-    ).toThrow("placeholder provenance");
+    ).toThrow("provenance");
+    expect(
+      assertSessionBriefLastGood({
+        ...valid,
+        sourceUpdatedAt: "2026-07-29T10:00:00.000Z",
+        generatedAt: "2026-07-29T10:01:00.000Z",
+        generator: "codex_app_server",
+        modelId: "gpt-5.6-sol",
+      }),
+    ).toMatchObject({
+      generator: "codex_app_server",
+      modelId: "gpt-5.6-sol",
+    });
   });
 });

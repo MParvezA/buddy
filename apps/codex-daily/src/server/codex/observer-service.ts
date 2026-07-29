@@ -39,7 +39,14 @@ export interface ObserverServiceOptions {
 
 export class ObserverUnavailableError extends Error {}
 export class ObserverNotFoundError extends Error {}
+export class ObserverInternalTurnError extends Error {
+  constructor(readonly category: "timeout" | "refusal" | "invalid_output" | "unavailable") {
+    super(`Codex internal turn failed (${category}).`);
+    this.name = "ObserverInternalTurnError";
+  }
+}
 export const DEFAULT_REPORTING_TURN_TIMEOUT_MS = 120_000;
+export const DEFAULT_SESSION_BRIEF_TURN_TIMEOUT_MS = 120_000;
 
 export class ObserverService extends EventEmitter {
   private readonly repository: ObserverRepository;
@@ -69,7 +76,7 @@ export class ObserverService extends EventEmitter {
   private lastErrorCategory: string | null = null;
   private lastErrorAt: string | null = null;
   private health: ObserverConnectionHealth;
-  private reportingThreadCreationBuffer:
+  private internalThreadCreationBuffer:
     | Array<{
         envelope: ProtocolMethodEnvelope;
         requestEpisodeNamespace: string;
@@ -77,6 +84,7 @@ export class ObserverService extends EventEmitter {
     | null = null;
   private reportingThreadCreation: Promise<string> | null = null;
   private inventoryCreationTail: Promise<void> = Promise.resolve();
+  private readonly ephemeralInternalThreadIds = new Set<string>();
   private connectionGeneration = 0;
 
   constructor(options: ObserverServiceOptions) {
@@ -260,9 +268,9 @@ export class ObserverService extends EventEmitter {
     register: (threadId: string) => void,
   ): Promise<string> {
     const client = this.connectedClient();
-    this.reportingThreadCreationBuffer = [];
+    this.internalThreadCreationBuffer = [];
     try {
-      const result = await client.requestReporting("thread/start", {
+      const result = await client.requestInternal("thread/start", {
         cwd: process.cwd(),
         approvalPolicy: "never",
         sandbox: "read-only",
@@ -277,12 +285,95 @@ export class ObserverService extends EventEmitter {
       // notifications are considered by the ordinary observer.
       this.repository.exclude(id, this.clock().toISOString());
       register(id);
-      this.replayReportingCreationBuffer(id);
+      this.replayInternalCreationBuffer(id);
       return id;
     } catch (error) {
-      this.replayReportingCreationBuffer(null);
+      this.replayInternalCreationBuffer(null);
       throw error;
     }
+  }
+
+  async readSessionBriefSource(
+    threadId: string,
+    signal?: AbortSignal,
+  ): Promise<unknown[]> {
+    if (this.repository.isExcluded(threadId) || this.ephemeralInternalThreadIds.has(threadId)) {
+      throw new ObserverNotFoundError("The observed thread was not found.");
+    }
+    const client = this.connectedClient();
+    const result = await client.request(
+      "thread/read",
+      { threadId, includeTurns: true },
+      signal,
+    );
+    const raw = assertThreadReadResponse(result);
+    if (
+      raw.id !== threadId ||
+      !Array.isArray(raw.turns)
+    ) {
+      throw new ObserverInternalTurnError("invalid_output");
+    }
+    return raw.turns;
+  }
+
+  async createSessionBriefAnalysisThread(signal?: AbortSignal): Promise<string> {
+    return this.withInventoryCreationLock(async () => {
+      const client = this.connectedClient();
+      this.internalThreadCreationBuffer = [];
+      try {
+        const result = await client.requestInternal(
+          "thread/start",
+          {
+            model: "gpt-5.6-sol",
+            allowProviderModelFallback: false,
+            ephemeral: true,
+            approvalPolicy: "never",
+            dynamicTools: [],
+            environments: [],
+            runtimeWorkspaceRoots: [],
+            cwd: null,
+            experimentalRawEvents: false,
+          },
+          signal,
+        );
+        const value = result as { thread?: { id?: unknown } };
+        const id = value?.thread?.id;
+        if (typeof id !== "string" || !id) {
+          throw new ObserverInternalTurnError("invalid_output");
+        }
+        this.ephemeralInternalThreadIds.add(id);
+        this.replayInternalCreationBuffer(id);
+        return id;
+      } catch (error) {
+        this.replayInternalCreationBuffer(null);
+        throw error;
+      }
+    });
+  }
+
+  runSessionBriefAnalysisTurn(
+    threadId: string,
+    prompt: string,
+    outputSchema: Record<string, unknown>,
+    signal?: AbortSignal,
+    timeoutMs = DEFAULT_SESSION_BRIEF_TURN_TIMEOUT_MS,
+  ): Promise<string> {
+    if (!this.ephemeralInternalThreadIds.has(threadId)) {
+      return Promise.reject(new ObserverInternalTurnError("unavailable"));
+    }
+    return this.runInternalTurn(
+      threadId,
+      {
+        threadId,
+        model: "gpt-5.6-sol",
+        effort: "medium",
+        environments: [],
+        input: [{ type: "text", text: prompt }],
+        outputSchema,
+      },
+      timeoutMs,
+      signal,
+    );
   }
 
   async readFinalAssistantMessage(threadId: string): Promise<string | null> {
@@ -303,52 +394,87 @@ export class ObserverService extends EventEmitter {
     if (!this.repository.isExcluded(threadId)) {
       throw new Error("The reporting thread is not durably excluded.");
     }
+    try {
+      return await this.runInternalTurn(
+        threadId,
+        { threadId, input: [{ type: "text", text: prompt }] },
+        this.reportingTurnTimeoutMs,
+      );
+    } catch (error) {
+      if (error instanceof ObserverInternalTurnError && error.category === "timeout") {
+        throw new Error("Codex reporting turn timed out.");
+      }
+      throw new Error("Codex reporting turn returned no final assistant message.");
+    }
+  }
+
+  private async runInternalTurn(
+    threadId: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const client = this.connectedClient();
-    let cancelCompletion = () => {};
+    let expectedTurnId: string | null = null;
+    const buffered = new Map<string, unknown>();
+    let settle:
+      | { resolve: (text: string) => void; reject: (error: Error) => void }
+      | null = null;
+    let finished = false;
+    const cleanup = () => {
+      client.off("message", listener);
+      this.clearTimer(timer);
+      signal?.removeEventListener("abort", abortListener);
+    };
+    const finish = (turn: unknown) => {
+      if (finished) return;
+      const text = exactCompletedAssistantText(turn, expectedTurnId);
+      finished = true;
+      cleanup();
+      if (text) settle?.resolve(text);
+      else settle?.reject(new ObserverInternalTurnError("refusal"));
+    };
+    const listener = (envelope: ProtocolMethodEnvelope) => {
+      if (envelope.method !== "turn/completed") return;
+      const envelopeThreadId = protocolThreadId(envelope);
+      if (envelopeThreadId !== threadId) return;
+      const params = envelope.params as { turn?: unknown };
+      const id = protocolTurnId(params?.turn);
+      if (!id) return;
+      if (expectedTurnId === id) finish(params.turn);
+      else buffered.set(id, params.turn);
+    };
+    const timer = this.setTimer(() => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      settle?.reject(new ObserverInternalTurnError("timeout"));
+    }, timeoutMs);
+    const abortListener = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      settle?.reject(new ObserverInternalTurnError("unavailable"));
+    };
+    signal?.addEventListener("abort", abortListener, { once: true });
+    client.on("message", listener);
     const completion = new Promise<string>((resolve, reject) => {
-      const timer = this.setTimer(() => {
-        client.off("message", listener);
-        reject(new Error("Codex reporting turn timed out."));
-      }, this.reportingTurnTimeoutMs);
-      const listener = (envelope: ProtocolMethodEnvelope) => {
-        if (envelope.method !== "turn/completed") return;
-        const params = envelope.params as {
-          threadId?: unknown;
-          thread?: { id?: unknown };
-          turn?: unknown;
-        };
-        if (
-          params?.threadId !== threadId &&
-          params?.thread?.id !== threadId
-        ) {
-          return;
-        }
-        const text = finalAssistantText([params.turn]);
-        if (!text) {
-          this.clearTimer(timer);
-          client.off("message", listener);
-          reject(new Error("Codex reporting turn returned no final assistant message."));
-          return;
-        }
-        this.clearTimer(timer);
-        client.off("message", listener);
-        resolve(text);
-      };
-      cancelCompletion = () => {
-        this.clearTimer(timer);
-        client.off("message", listener);
-      };
-      client.on("message", listener);
+      settle = { resolve, reject };
     });
     try {
-      await client.requestReporting("turn/start", {
-        threadId,
-        input: [{ type: "text", text: prompt }],
-      });
+      const result = await client.requestInternal("turn/start", params, signal);
+      const value = result as { turn?: unknown };
+      expectedTurnId = protocolTurnId(value?.turn);
+      if (!expectedTurnId) throw new ObserverInternalTurnError("invalid_output");
+      const early = buffered.get(expectedTurnId);
+      if (early) finish(early);
       return await completion;
     } catch (error) {
-      cancelCompletion();
-      throw error instanceof Error ? error : new Error("Codex reporting turn failed.");
+      if (!finished) {
+        finished = true;
+        cleanup();
+      }
+      throw error;
     }
   }
 
@@ -397,8 +523,8 @@ export class ObserverService extends EventEmitter {
     client.on("protocolError", disconnect);
     client.on("message", (envelope: ProtocolMethodEnvelope) => {
       try {
-        if (this.reportingThreadCreationBuffer) {
-          this.reportingThreadCreationBuffer.push({
+        if (this.internalThreadCreationBuffer) {
+          this.internalThreadCreationBuffer.push({
             envelope,
             requestEpisodeNamespace,
           });
@@ -440,13 +566,13 @@ export class ObserverService extends EventEmitter {
     }
   }
 
-  private replayReportingCreationBuffer(reportingThreadId: string | null): void {
-    const buffered = this.reportingThreadCreationBuffer ?? [];
-    this.reportingThreadCreationBuffer = null;
+  private replayInternalCreationBuffer(internalThreadId: string | null): void {
+    const buffered = this.internalThreadCreationBuffer ?? [];
+    this.internalThreadCreationBuffer = null;
     for (const { envelope, requestEpisodeNamespace } of buffered) {
       if (
-        reportingThreadId &&
-        protocolThreadId(envelope) === reportingThreadId
+        internalThreadId &&
+        protocolThreadId(envelope) === internalThreadId
       ) {
         continue;
       }
@@ -476,7 +602,11 @@ export class ObserverService extends EventEmitter {
         );
         for (const value of response.data) {
           const thread = normalizeThread(value, archived, this.clock);
-          if (!thread || this.repository.isExcluded(thread.id)) continue;
+          if (
+            !thread ||
+            this.repository.isExcluded(thread.id) ||
+            this.ephemeralInternalThreadIds.has(thread.id)
+          ) continue;
           const previous = this.repository.findThread(thread.id);
           thread.lastActivityAt = previous?.lastActivityAt ?? thread.updatedAt;
           if (!this.repository.upsertThread(thread)) continue;
@@ -526,10 +656,18 @@ export class ObserverService extends EventEmitter {
       requestEpisodeNamespace,
     );
     let changed = false;
-    if (normalized.thread && !this.repository.isExcluded(normalized.thread.id)) {
+    if (
+      normalized.thread &&
+      !this.repository.isExcluded(normalized.thread.id) &&
+      !this.ephemeralInternalThreadIds.has(normalized.thread.id)
+    ) {
       changed = this.repository.upsertThread(normalized.thread, true) || changed;
     }
-    if (normalized.runtime && !this.repository.isExcluded(normalized.runtime.threadId)) {
+    if (
+      normalized.runtime &&
+      !this.repository.isExcluded(normalized.runtime.threadId) &&
+      !this.ephemeralInternalThreadIds.has(normalized.runtime.threadId)
+    ) {
       this.repository.updateRuntime(
         normalized.runtime.threadId,
         normalized.runtime.runtime,
@@ -539,7 +677,11 @@ export class ObserverService extends EventEmitter {
       );
       changed = true;
     }
-    if (normalized.archived && !this.repository.isExcluded(normalized.archived.threadId)) {
+    if (
+      normalized.archived &&
+      !this.repository.isExcluded(normalized.archived.threadId) &&
+      !this.ephemeralInternalThreadIds.has(normalized.archived.threadId)
+    ) {
       this.repository.setArchived(
         normalized.archived.threadId,
         normalized.archived.value,
@@ -547,7 +689,10 @@ export class ObserverService extends EventEmitter {
       );
       changed = true;
     }
-    if (normalized.activity) {
+    if (
+      normalized.activity &&
+      !this.ephemeralInternalThreadIds.has(normalized.activity.threadId)
+    ) {
       changed = this.addActivity(normalized.activity) || changed;
     }
     if (normalized.unknown) this.diagnosticsIgnored += 1;
@@ -688,6 +833,42 @@ function protocolThreadId(envelope: ProtocolMethodEnvelope): string | null {
   if (record.thread && typeof record.thread === "object" && !Array.isArray(record.thread)) {
     const id = (record.thread as Record<string, unknown>).id;
     return typeof id === "string" ? id : null;
+  }
+  return null;
+}
+
+function protocolTurnId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = (value as Record<string, unknown>).id;
+  return typeof id === "string" && id ? id : null;
+}
+
+function exactCompletedAssistantText(
+  turn: unknown,
+  expectedTurnId: string | null,
+): string | null {
+  if (
+    !turn ||
+    typeof turn !== "object" ||
+    Array.isArray(turn) ||
+    protocolTurnId(turn) !== expectedTurnId
+  ) {
+    return null;
+  }
+  const record = turn as Record<string, unknown>;
+  if (record.status !== "completed" || !Array.isArray(record.items)) return null;
+  for (let index = record.items.length - 1; index >= 0; index -= 1) {
+    const item = record.items[index];
+    if (
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      (item as Record<string, unknown>).type === "agentMessage" &&
+      typeof (item as Record<string, unknown>).text === "string" &&
+      (item as Record<string, unknown>).text
+    ) {
+      return (item as Record<string, unknown>).text as string;
+    }
   }
   return null;
 }

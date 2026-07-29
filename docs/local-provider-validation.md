@@ -51,7 +51,7 @@ The final workspace validation completed:
 
 ```text
 16 packages built
-242 tests
+247 tests
 0 errors
 0 failures
 13 skipped
@@ -63,7 +63,7 @@ provider or safety tests.
 
 Provider-focused results include:
 
-- `buddy_voice`: 72 passing tests;
+- `buddy_voice`: 77 passing tests;
 - `buddy_brain`: 27 passing tests;
 - `buddy_bringup`: 15 passing tests, including the root end-to-end flow;
 - launch-contract checks proving real providers require explicit opt-in and
@@ -120,7 +120,9 @@ Adversarial provider tests additionally prove:
 - voice and model children receive explicit environment allowlists rather than
   secret-bearing parent configuration;
 - an exited provider launcher cannot leave a surviving descendant process
-  group after timeout, cancellation, or shutdown.
+  group after success, timeout, cancellation, or shutdown;
+- Piper rejects speech input beyond 64 KiB before starting a child process or
+  allocating provider output storage.
 
 ### Full local composition
 

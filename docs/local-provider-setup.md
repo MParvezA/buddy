@@ -211,6 +211,7 @@ In the tested session, the A2DP profile index was `5`.
 - llama.cpp: three inference threads, no GPU layers, 4096-token context,
   256-token output ceiling, 20-second default timeout;
 - whisper.cpp: two threads and a 30-second timeout;
+- Piper input: 64 KiB UTF-8 maximum per speech request;
 - one dialogue/model request at a time;
 - measured Qwen provider peak during the initial live smoke: approximately
   2.4 GiB RSS;

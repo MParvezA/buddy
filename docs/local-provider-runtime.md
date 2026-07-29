@@ -94,6 +94,7 @@ deterministic emergency-stop detection, dialogue validation, or confirmation.
 | STT language | automatic | English or German hints allowed |
 | TTS runtime | `piper` | Local executable only |
 | TTS voices | one `en_*`, one `de_*` | Explicit model/config files |
+| TTS input | UTF-8 text | 64 KiB |
 | TTS synthesis timeout | 15 seconds | 1–30 seconds |
 | TTS playback timeout | 30 seconds | 1–60 seconds |
 

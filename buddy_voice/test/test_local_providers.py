@@ -24,7 +24,11 @@ from buddy_voice.local_providers import (
     validate_tts_synthesis_timeout_seconds,
     WhisperCppSpeechToTextProvider,
 )
-from buddy_voice.providers import SynthesizedSpeech
+from buddy_voice.providers import (
+    SpeechSynthesisCancelled,
+    SpeechSynthesisTimeout,
+    SynthesizedSpeech,
+)
 from buddy_voice.speak_node import BuddySpeakNode
 import pytest
 
@@ -293,6 +297,52 @@ with wave.open(path, 'wb') as output:
         provider.play(speech, cancel_event=Event(), deadline_monotonic=time.monotonic())
     provider.cleanup(speech)
     assert speech.audio_path is not None and not speech.audio_path.exists()
+
+
+@pytest.mark.parametrize(
+    ('cancel_after_seconds', 'deadline_offset_seconds', 'expected_error'),
+    ((0.05, 1.0, SpeechSynthesisCancelled), (None, 0.05, SpeechSynthesisTimeout)),
+)
+def test_piper_nonreading_stdin_is_cancellable_and_cleans_temp_audio(
+        tmp_path: Path,
+        cancel_after_seconds: float | None,
+        deadline_offset_seconds: float,
+        expected_error: type[Exception]) -> None:
+    """Oversized valid text cannot block Piper cancellation, timeout, or cleanup."""
+    piper = _script(tmp_path / 'piper', """
+import signal, sys, time
+output = sys.argv[sys.argv.index('--output_file') + 1]
+def stop(*_):
+    open(output + '.terminated', 'w').write('terminated')
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+while True: time.sleep(0.01)
+""")
+    player = _script(tmp_path / 'pw-play', 'import sys\nsys.exit(0)\n')
+    en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
+    de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
+    provider = PiperTextToSpeechProvider(
+        piper_binary=piper, playback_binary=player,
+        english_voice=PiperVoice('en_test', 'en-US', en_model, en_config),
+        german_voice=PiperVoice('de_test', 'de-DE', de_model, de_config), temp_directory=tmp_path)
+    cancelled = Event()
+    trigger = None
+    if cancel_after_seconds is not None:
+        trigger = Thread(target=lambda: (time.sleep(cancel_after_seconds), cancelled.set()))
+        trigger.start()
+    started = time.monotonic()
+    with pytest.raises(expected_error):
+        provider.synthesize(
+            'x' * (2 * 1024 * 1024),
+            '',
+            cancel_event=cancelled,
+            deadline_monotonic=time.monotonic() + deadline_offset_seconds,
+        )
+    if trigger is not None:
+        trigger.join()
+    assert time.monotonic() - started < 0.6
+    assert not list(tmp_path.glob('buddy-piper-*.wav'))
+    assert list(tmp_path.glob('buddy-piper-*.wav.terminated'))
 
 
 def test_missing_local_assets_fail_closed_and_wakeword_stays_disabled(tmp_path: Path) -> None:

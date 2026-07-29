@@ -343,6 +343,11 @@ def _transcript_from_json(payload: object, locale: str) -> str:
     raise SttError(f'whisper.cpp returned invalid JSON transcript for {locale}')
 
 
+def _is_no_speech_sentinel(text: str) -> bool:
+    """Recognize whisper.cpp's exact blank-audio sentinel without broad filtering."""
+    return text.strip().casefold() == '[blank_audio]'
+
+
 def _auto_locale_from_json(payload: object, fallback_locale: str) -> str:
     """Map whisper's detected English/German language or use an explicit fallback."""
     if not isinstance(payload, dict):
@@ -412,6 +417,8 @@ class WhisperCppSpeechToTextProvider:
             text = _transcript_from_json(payload, capture.locale)
             if not text:
                 raise SttError('whisper.cpp produced an empty final transcript')
+            if _is_no_speech_sentinel(text):
+                raise SttError('whisper.cpp produced no usable utterance')
             locale = (
                 'de-DE' if self._language == 'de'
                 else 'en-US' if self._language == 'en'

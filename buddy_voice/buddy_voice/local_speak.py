@@ -9,7 +9,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.signals import SignalHandlerOptions
 
 from .local_providers import PiperTextToSpeechProvider, PiperVoice
-from .speak_node import BuddySpeakNode, _shutdown_speak_node, create_speak_executor
+from .speak_node import _shutdown_speak_node, BuddySpeakNode, create_speak_executor
 
 
 def _arguments() -> argparse.ArgumentParser:
@@ -29,9 +29,14 @@ def _arguments() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_arguments(argv: list[str] | None) -> tuple[argparse.Namespace, list[str]]:
+    """Parse local Piper options while retaining ordinary ROS 2 arguments/remaps."""
+    return _arguments().parse_known_args(argv)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run a real local output server only when its assets are explicitly supplied."""
-    args = _arguments().parse_args(argv)
+    args, ros_args = _parse_arguments(argv)
     provider = PiperTextToSpeechProvider(
         piper_binary=args.piper_binary,
         playback_binary=args.playback_binary,
@@ -41,7 +46,7 @@ def main(argv: list[str] | None = None) -> None:
         synthesis_timeout_seconds=args.synthesis_timeout_seconds,
         playback_timeout_seconds=args.playback_timeout_seconds,
     )
-    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    rclpy.init(args=ros_args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     executor = None
     try:

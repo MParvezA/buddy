@@ -13,6 +13,7 @@ import type { SessionBriefOperationalDiagnostics } from "../../shared/operations
 import type { ObserverService } from "../codex/observer-service.js";
 import {
   SessionBriefAnalysisError,
+  SessionBriefSourceSupersededError,
   type SessionBriefAnalyzer,
 } from "./session-brief-analyzer.js";
 import {
@@ -51,6 +52,7 @@ interface SelectedRevision {
 interface RunningWork {
   promise: Promise<void>;
   controller: AbortController;
+  job: SessionBriefJob;
 }
 
 export class SessionBriefService extends EventEmitter {
@@ -283,6 +285,7 @@ export class SessionBriefService extends EventEmitter {
       updatedAt: thread.updatedAt,
     }));
     this.selectedAt = now;
+    this.abortObsoleteRunningWork();
     const pruned = this.repository.reconcileWindow(
       this.selected.map((item) => item.threadId),
       now,
@@ -335,7 +338,7 @@ export class SessionBriefService extends EventEmitter {
       const controller = new AbortController();
       const epoch = this.epoch;
       const promise = this.run(marked, controller.signal, epoch);
-      this.running.set(marked.jobId, { promise, controller });
+      this.running.set(marked.jobId, { promise, controller, job: marked });
       this.observedPeakConcurrency = Math.max(
         this.observedPeakConcurrency,
         this.running.size,
@@ -371,6 +374,16 @@ export class SessionBriefService extends EventEmitter {
         epoch,
       );
     } catch (error) {
+      if (error instanceof SessionBriefSourceSupersededError) {
+        if (this.isCurrentWork(job, epoch, signal)) {
+          this.repository.markFailure(
+            job.jobId,
+            "invalid_output",
+            this.clock().toISOString(),
+          );
+        }
+        return;
+      }
       if (!this.isCurrentWork(job, epoch, signal)) return;
       const failure =
         error instanceof SessionBriefAnalysisError
@@ -451,6 +464,17 @@ export class SessionBriefService extends EventEmitter {
     this.dueTimer = null;
   }
 
+  private abortObsoleteRunningWork(): void {
+    const selected = new Map(
+      this.selected.map((item) => [item.threadId, item.updatedAt]),
+    );
+    for (const work of this.running.values()) {
+      if (selected.get(work.job.threadId) !== work.job.targetUpdatedAt) {
+        work.controller.abort();
+      }
+    }
+  }
+
   private assertObserverAvailable(): void {
     if (!usableSnapshot(this.observer.snapshot()) || !this.acceptingWork) {
       throw new SessionBriefObserverUnavailableError(
@@ -490,6 +514,7 @@ export class SessionBriefService extends EventEmitter {
   }
 
   private publish(): void {
+    if (this.shutdownState !== "running") return;
     this.emit("snapshot", this.nextEvent());
   }
 }

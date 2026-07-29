@@ -1,4 +1,11 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +15,7 @@ import type {
   SessionBriefItem,
   SessionBriefSnapshot,
 } from "../../../../src/shared/session-briefs";
+import { parseSessionBriefSnapshot } from "../../../../src/client/api/session-briefs-client";
 
 const now = "2026-07-29T14:00:00.000Z";
 
@@ -28,7 +36,7 @@ function observedThread(index: number, runtime: "active" | "idle" = "idle") {
     runtime,
     waitingOnApproval: false,
     waitingOnUserInput: false,
-    lastActivityAt: `2026-07-29T13:${minute}:00.000Z`,
+    lastActivityAt: now,
   } as const;
 }
 
@@ -169,6 +177,17 @@ function baseFetch(initial: SessionBriefSnapshot) {
       };
       return Response.json(currentObserver);
     }
+    if (url.includes("/api/tasks/") && init?.method === "DELETE") {
+      const segments = url.split("/");
+      currentObserver = {
+        ...currentObserver,
+        taskLinks: currentObserver.taskLinks.filter(
+          (link) =>
+            link.taskId !== segments[3] || link.threadId !== segments[5],
+        ),
+      };
+      return Response.json(currentObserver);
+    }
     if (url === "/api/attention") {
       return Response.json({
         capability: "standalone_history",
@@ -212,6 +231,28 @@ afterEach(() => {
 });
 
 describe("Recent session briefs", () => {
+  it("reconstructs an allowlisted DTO before browser state can retain extra fields", () => {
+    const raw = {
+      ...snapshot([briefItem(1)]),
+      rawTranscript: "MUST_DROP_SNAPSHOT",
+      observer: {
+        ...snapshot([]).observer,
+        rawPrompt: "MUST_DROP_OBSERVER",
+      },
+      items: [{
+        ...briefItem(1),
+        rawEnvelope: "MUST_DROP_ITEM",
+        lastGood: {
+          ...briefItem(1).lastGood!,
+          rawOutput: "MUST_DROP_BRIEF",
+        },
+      }],
+    };
+    const parsed = parseSessionBriefSnapshot(raw);
+    expect(JSON.stringify(parsed)).not.toMatch(/MUST_DROP_/);
+    expect(parsed).toEqual(snapshot([briefItem(1)]));
+  });
+
   it("preserves canonical order, factual controls, structured meaning, and the ten-card cap", async () => {
     const items = Array.from({ length: 10 }, (_, index) => briefItem(index + 1));
     renderDashboard(snapshot(items));
@@ -239,6 +280,8 @@ describe("Recent session briefs", () => {
     expect(within(first).getByText("High confidence")).toBeVisible();
     expect(within(first).getByText("Current")).toBeVisible();
     expect(within(first).getByText("No blocker inferred")).toBeVisible();
+    const activityTime = first.querySelector(".card-meta time");
+    expect(activityTime).toHaveAttribute("datetime", now);
     expect(screen.queryByText("Active and recent Codex chats")).not.toBeInTheDocument();
   });
 
@@ -265,6 +308,21 @@ describe("Recent session briefs", () => {
     const source = FakeEventSource.instances.find(
       (candidate) => candidate.url === "/api/session-briefs/events",
     )!;
+    source.emit("session-briefs", snapshot([
+      briefItem(1, {
+        analysisStatus: "analyzing",
+        freshness: "stale",
+        queuedAt: now,
+        startedAt: now,
+      }),
+      briefItem(2, {
+        analysisStatus: "analyzing",
+        freshness: "missing",
+        lastGood: null,
+        startedAt: now,
+      }),
+    ]));
+    expect(await screen.findByText("2 analyzing · 1 stale")).toBeVisible();
     source.emit("session-briefs", snapshot([
       briefItem(1, {
         analysisStatus: "failed",
@@ -322,6 +380,71 @@ describe("Recent session briefs", () => {
       "href",
       "/threads/thread-1",
     );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Unlink Release monitor from Session 1",
+      }),
+    );
+    expect(await screen.findByText("Unplanned work")).toBeVisible();
+  });
+
+  it("disables pending refresh controls and suppresses overlapping duplicate requests", async () => {
+    const failed = snapshot([
+      briefItem(1, {
+        analysisStatus: "failed",
+        freshness: "missing",
+        lastGood: null,
+        failure: { category: "invalid_output", at: now },
+      }),
+    ]);
+    const fallback = baseFetch(failed);
+    let resolveAll!: (response: Response) => void;
+    let resolveThread!: (response: Response) => void;
+    const allPending = new Promise<Response>((resolve) => {
+      resolveAll = resolve;
+    });
+    const threadPending = new Promise<Response>((resolve) => {
+      resolveThread = resolve;
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/session-briefs/refresh") return allPending;
+      if (url === "/api/session-briefs/thread-1/refresh") return threadPending;
+      return fallback(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+    const refresh = await screen.findByRole("button", {
+      name: "Refresh 10 briefs",
+    });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    expect(await screen.findByRole("button", { name: "Refreshing 10 briefs…" }))
+      .toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([url]) =>
+      String(url) === "/api/session-briefs/refresh")).toHaveLength(1);
+    resolveAll(Response.json(failed, { status: 202 }));
+    await waitFor(() => expect(refresh).toBeEnabled());
+
+    const retry = screen.getByRole("button", {
+      name: "Retry brief for Session 1",
+    });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(
+      await screen.findByRole("button", {
+        name: "Retry brief for Session 1",
+      }),
+    ).toHaveTextContent("Queuing retry…");
+    expect(retry).toBeDisabled();
+    expect(fetchMock.mock.calls.filter(([url]) =>
+      String(url) === "/api/session-briefs/thread-1/refresh")).toHaveLength(1);
+    resolveThread(Response.json(failed, { status: 202 }));
+    await waitFor(() => expect(retry).toBeEnabled());
   });
 
   it("keeps last-known facts visible when offline and explains disabled retry", async () => {
@@ -344,11 +467,32 @@ describe("Recent session briefs", () => {
       .toBeVisible();
   });
 
+  it.each(["connecting", "reconnecting"] as const)(
+    "uses state-accurate retry copy while Codex is %s",
+    async (state) => {
+      renderDashboard(snapshot([
+        briefItem(1, {
+          analysisStatus: "unavailable",
+          freshness: "stale",
+          failure: { category: "observer_unavailable", at: now },
+        }),
+      ], {
+        observer: { state, capability: "standalone_history" },
+      }));
+      expect(
+        await screen.findByText(
+          `Retry is unavailable while Codex is ${state}.`,
+        ),
+      ).toBeVisible();
+    },
+  );
+
   it("distinguishes no eligible sessions from a safe initial read failure", async () => {
     renderDashboard(snapshot([]));
     expect(await screen.findByRole("heading", { name: "No eligible Codex sessions" }))
       .toBeVisible();
     expect(screen.getByText("0 available")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Refresh 10 briefs" })).toBeDisabled();
 
     cleanup();
     const fetchMock = baseFetch(snapshot([]));
@@ -374,6 +518,33 @@ describe("Recent session briefs", () => {
       .toBeVisible();
     expect(screen.queryByRole("heading", { name: "No eligible Codex sessions" }))
       .not.toBeInTheDocument();
+  });
+
+  it("shows initial loading until the first allowlisted snapshot arrives", async () => {
+    const fallback = baseFetch(snapshot([]));
+    let resolveBriefs!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveBriefs = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        String(input) === "/api/session-briefs"
+          ? pending
+          : fallback(input, init)),
+    );
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>,
+    );
+    expect((await screen.findAllByText("Loading recent session briefs…")).length)
+      .toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Refresh 10 briefs" }))
+      .toBeDisabled();
+    resolveBriefs(Response.json(snapshot([briefItem(1)])));
+    expect(await screen.findByText("Session 1 is preparing the release."))
+      .toBeVisible();
   });
 
   it("shows a safe mutation failure without erasing the last good brief", async () => {

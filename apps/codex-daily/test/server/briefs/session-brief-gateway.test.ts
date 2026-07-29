@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   SessionBriefAnalysisError,
+  SessionBriefSourceSupersededError,
 } from "../../../src/server/briefs/session-brief-analyzer.js";
 import { SessionBriefGateway } from "../../../src/server/briefs/session-brief-gateway.js";
 import { ObserverService } from "../../../src/server/codex/observer-service.js";
@@ -134,9 +135,12 @@ describe("GPT-5.6 session brief gateway", () => {
   it("does not create an analysis thread when usable input is empty", async () => {
     const calls: string[] = [];
     const gateway = new SessionBriefGateway({
-      readSessionBriefSource: async () => [
-        { id: "one", items: [{ type: "reasoning", summary: "private" }] },
-      ],
+      readSessionBriefSource: async () => ({
+        sourceUpdatedAt: "2026-07-29T10:00:00.000Z",
+        turns: [
+          { id: "one", items: [{ type: "reasoning", summary: "private" }] },
+        ],
+      }),
       createSessionBriefAnalysisThread: async () => {
         calls.push("thread/start");
         return "analysis";
@@ -154,6 +158,88 @@ describe("GPT-5.6 session brief gateway", () => {
     });
     expect(calls).toEqual([]);
   });
+
+  it("rejects a source read whose actual revision no longer matches the queued revision", async () => {
+    let created = false;
+    const gateway = new SessionBriefGateway({
+      readSessionBriefSource: async () => ({
+        sourceUpdatedAt: "2026-07-29T10:01:00.000Z",
+        turns: [{
+          id: "one",
+          items: [{
+            type: "userMessage",
+            content: [{ type: "text", text: "Organize the release" }],
+          }],
+        }],
+      }),
+      createSessionBriefAnalysisThread: async () => {
+        created = true;
+        return "analysis";
+      },
+      runSessionBriefAnalysisTurn: async () => "{}",
+    });
+
+    await expect(
+      gateway.analyze({
+        threadId: "ordinary",
+        sourceUpdatedAt: "2026-07-29T10:00:00.000Z",
+      }),
+    ).rejects.toBeInstanceOf(SessionBriefSourceSupersededError);
+    expect(created).toBe(false);
+  });
+
+  it.each([
+    ["wrong_model", "analysis_unavailable"],
+    ["durable", "analysis_unavailable"],
+    ["contradictory_durable", "analysis_unavailable"],
+    ["malformed", "analysis_unavailable"],
+    ["unavailable", "analysis_unavailable"],
+    ["source_missing", "source_missing"],
+  ] as const)(
+    "rejects %s safely without projecting or starting an analysis turn",
+    async (analysisMode, category) => {
+      temporaryDirectory = mkdtempSync(path.join(tmpdir(), "codex-daily-brief-"));
+      const requestLog = path.join(temporaryDirectory, "requests.jsonl");
+      database = openDatabase({ path: ":memory:" });
+      observer = new ObserverService({
+        repository: new ObserverRepository(database.connection),
+        executable: fixture,
+        processFactory: (executable, args) =>
+          spawn(executable, [...args], {
+            shell: false,
+            stdio: ["pipe", "pipe", "pipe"],
+            env: {
+              ...process.env,
+              CODEX_DAILY_FAKE_ANALYSIS_MODE: analysisMode,
+              CODEX_DAILY_FAKE_REQUEST_LOG: requestLog,
+            },
+          }),
+        inventoryIntervalMs: 60_000,
+        requestTimeoutMs: 2_000,
+      });
+      await observer.start();
+
+      await expect(
+        new SessionBriefGateway(observer, 2_000).analyze({
+          threadId: "thread-one",
+          sourceUpdatedAt: "2026-07-29T10:00:00.000Z",
+        }),
+      ).rejects.toMatchObject({
+        category,
+        transient: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(observer.snapshot().threads.map((item) => item.id)).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/^codex-daily-analysis-/)]),
+      );
+      const requests = readFileSync(requestLog, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { method?: string });
+      expect(requests.some((request) => request.method === "turn/start")).toBe(false);
+    },
+  );
 
   it.each([
     [
@@ -173,13 +259,16 @@ describe("GPT-5.6 session brief gateway", () => {
     [async () => "```json\n{}\n```", "invalid_output", false],
   ])("maps model boundaries to safe categories", async (run, category, transient) => {
     const gateway = new SessionBriefGateway({
-      readSessionBriefSource: async () => [{
-        id: "one",
-        items: [{
-          type: "userMessage",
-          content: [{ type: "text", text: "Organize the release" }],
+      readSessionBriefSource: async () => ({
+        sourceUpdatedAt: "2026-07-29T10:00:00.000Z",
+        turns: [{
+          id: "one",
+          items: [{
+            type: "userMessage",
+            content: [{ type: "text", text: "Organize the release" }],
+          }],
         }],
-      }],
+      }),
       createSessionBriefAnalysisThread: async () => "analysis",
       runSessionBriefAnalysisTurn: run,
     });

@@ -2,7 +2,10 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionBriefAnalyzer } from "../../../src/server/briefs/session-brief-analyzer.js";
-import { SessionBriefAnalysisError } from "../../../src/server/briefs/session-brief-analyzer.js";
+import {
+  SessionBriefAnalysisError,
+  SessionBriefSourceSupersededError,
+} from "../../../src/server/briefs/session-brief-analyzer.js";
 import { SessionBriefRepository } from "../../../src/server/briefs/session-brief-repository.js";
 import {
   selectRecentSessions,
@@ -215,6 +218,80 @@ describe("session brief service", () => {
     await service.stop();
   });
 
+  it.each(["revision", "window-exit"] as const)(
+    "aborts active work immediately on %s supersession",
+    async (mode) => {
+      database = openDatabase({ path: ":memory:" });
+      const first = thread("thread-one", "2026-07-29T10:00:00.000Z");
+      const observedRepository = new ObserverRepository(database.connection);
+      observedRepository.upsertThread(first);
+      const observer = new FakeObserver(snapshot([first]));
+      const activeSignals: AbortSignal[] = [];
+      const analyzer: SessionBriefAnalyzer = {
+        analyze: ({ signal }) =>
+          new Promise((resolve) => {
+            if (signal) activeSignals.push(signal);
+            signal?.addEventListener("abort", () => resolve(realResult), {
+              once: true,
+            });
+          }),
+      };
+      const service = new SessionBriefService({
+        repository: new SessionBriefRepository(database.connection),
+        observer,
+        analyzer,
+        debounceMs: 0,
+        retentionIntervalMs: 100_000,
+      });
+      service.start();
+      await flushPromises();
+      expect(service.snapshot().analyzing).toBe(1);
+      expect(activeSignals[0]?.aborted).toBe(false);
+
+      if (mode === "revision") {
+        const revised = thread("thread-one", "2026-07-29T11:00:00.000Z");
+        observedRepository.upsertThread(revised);
+        observer.update(snapshot([revised]));
+      } else {
+        observer.update(snapshot([]));
+      }
+
+      expect(activeSignals[0]?.aborted).toBe(true);
+      await flushPromises();
+      if (mode === "window-exit") {
+        expect(service.snapshot().items).toEqual([]);
+      }
+      await service.stop();
+    },
+  );
+
+  it("turns an unmatched source revision into a safe terminal failure", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const observed = thread("thread-one", "2026-07-29T10:00:00.000Z");
+    new ObserverRepository(database.connection).upsertThread(observed);
+    const observer = new FakeObserver(snapshot([observed]));
+    const service = new SessionBriefService({
+      repository: new SessionBriefRepository(database.connection),
+      observer,
+      analyzer: {
+        analyze: async () => {
+          throw new SessionBriefSourceSupersededError(
+            "2026-07-29T09:00:00.000Z",
+          );
+        },
+      },
+      debounceMs: 0,
+      retentionIntervalMs: 100_000,
+    });
+    service.start();
+    await settle();
+    expect(service.snapshot().items[0]).toMatchObject({
+      analysisStatus: "failed",
+      failure: { category: "invalid_output" },
+    });
+    await service.stop();
+  });
+
   it("debounces automatic churn for thirty seconds and coalesces repeated snapshots", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-29T12:00:00.000Z"));
@@ -388,6 +465,45 @@ describe("session brief service", () => {
     expect(briefRepository.listBriefRowsForExport()).toEqual([]);
     database.connection.prepare("DELETE FROM session_brief_jobs").run();
     expect(briefRepository.listBriefRowsForExport()).toEqual([]);
+    await service.stop();
+  });
+
+  it("suppresses drain-time SSE snapshots until authoritative state resumes", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const observed = thread("thread-one", "2026-07-29T10:00:00.000Z");
+    new ObserverRepository(database.connection).upsertThread(observed);
+    const observer = new FakeObserver(snapshot([observed]));
+    const analyzer: SessionBriefAnalyzer = {
+      analyze: ({ signal }) =>
+        new Promise((resolve) => {
+          signal?.addEventListener("abort", () => resolve(realResult), {
+            once: true,
+          });
+        }),
+    };
+    const briefRepository = new SessionBriefRepository(database.connection);
+    const service = new SessionBriefService({
+      repository: briefRepository,
+      observer,
+      analyzer,
+      debounceMs: 0,
+      retentionIntervalMs: 100_000,
+    });
+    const published: Array<ReturnType<SessionBriefService["snapshot"]>> = [];
+    service.on("snapshot", (event: { snapshot: ReturnType<SessionBriefService["snapshot"]> }) => {
+      published.push(event.snapshot);
+    });
+    service.start();
+    await flushPromises();
+    expect(service.snapshot().analyzing).toBe(1);
+    published.length = 0;
+
+    await service.pauseAndDrain();
+    expect(published).toEqual([]);
+    database.connection.prepare("DELETE FROM session_brief_jobs").run();
+    service.resume();
+    expect(published.length).toBeGreaterThan(0);
+    expect(published[0]?.items[0]?.analysisStatus).not.toBe("analyzing");
     await service.stop();
   });
 });

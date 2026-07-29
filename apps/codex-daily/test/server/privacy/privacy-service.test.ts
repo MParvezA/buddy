@@ -347,6 +347,36 @@ describe("local monitor privacy operations", () => {
       position: 0,
       now: "2026-07-29T08:00:00.000Z",
     });
+    value.observer.upsertThread(observedThread());
+    const briefJob = value.briefs.enqueue(
+      "thread-one",
+      "2026-07-29T00:00:00.000Z",
+      "automatic",
+      "2026-07-29T01:00:00.000Z",
+    )!;
+    value.briefs.markAnalyzing(
+      briefJob.jobId,
+      "2026-07-29T01:01:00.000Z",
+    );
+    value.briefs.promote(
+      briefJob.jobId,
+      briefJob.threadId,
+      briefJob.targetUpdatedAt,
+      {
+        content: {
+          currentState: "The retained chat is preparing a release.",
+          done: [],
+          operatorActions: ["Review the retained release."],
+          blockers: [],
+          confidence: "medium",
+          evidence: ["user:first-intent"],
+        },
+        generator: "codex_app_server",
+        modelId: "gpt-5.6-sol",
+      },
+      "2026-07-29T01:02:00.000Z",
+      0,
+    );
     value.db.exec(`
       CREATE TRIGGER fail_day_deletion
       BEFORE DELETE ON days
@@ -359,6 +389,7 @@ describe("local monitor privacy operations", () => {
       value.privacy.deleteDay("2026-07-29", "DELETE 2026-07-29"),
     ).rejects.toThrow(/injected local deletion failure/);
     expect(value.planning.listTasks("2026-07-29")).toHaveLength(1);
+    expect(value.privacy.export().sessionBriefs).toHaveLength(1);
     expect(value.pauseWriters).toHaveBeenCalledOnce();
     expect(value.resumeWriters).toHaveBeenCalledOnce();
     expect(value.privacy.databaseHealth().status).toBe("ok");

@@ -1,4 +1,16 @@
-import type { SessionBriefSnapshot } from "../../shared/session-briefs";
+import type {
+  SessionBriefAnalysisStatus,
+  SessionBriefConfidence,
+  SessionBriefFailureCategory,
+  SessionBriefFreshness,
+  SessionBriefItem,
+  SessionBriefLastGood,
+  SessionBriefSnapshot,
+} from "../../shared/session-briefs";
+import type {
+  ObserverHealthState,
+  ObserverMode,
+} from "../../shared/observer-types";
 
 const analysisStatuses = new Set([
   "queued",
@@ -35,8 +47,41 @@ function nullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function isItem(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
+function parseLastGood(value: unknown): SessionBriefLastGood | null | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== "object") return undefined;
+  const brief = value as Record<string, unknown>;
+  if (
+    typeof brief.sourceUpdatedAt !== "string" ||
+    typeof brief.generatedAt !== "string" ||
+    brief.generator !== "codex_app_server" ||
+    brief.modelId !== "gpt-5.6-sol" ||
+    typeof brief.currentState !== "string" ||
+    brief.currentState.trim().length === 0 ||
+    !strings(brief.done) ||
+    !strings(brief.operatorActions) ||
+    !strings(brief.blockers) ||
+    !confidenceValues.has(brief.confidence as string) ||
+    !strings(brief.evidence)
+  ) {
+    return undefined;
+  }
+  return {
+    sourceUpdatedAt: brief.sourceUpdatedAt,
+    generatedAt: brief.generatedAt,
+    generator: "codex_app_server",
+    modelId: "gpt-5.6-sol",
+    currentState: brief.currentState,
+    done: [...brief.done],
+    operatorActions: [...brief.operatorActions],
+    blockers: [...brief.blockers],
+    confidence: brief.confidence as SessionBriefConfidence,
+    evidence: [...brief.evidence],
+  };
+}
+
+function parseItem(value: unknown): SessionBriefItem | null {
+  if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
   if (
     typeof item.threadId !== "string" ||
@@ -47,63 +92,89 @@ function isItem(value: unknown): boolean {
     !nullableString(item.startedAt) ||
     typeof item.updatedAt !== "string"
   ) {
-    return false;
+    return null;
   }
+  let failure: SessionBriefItem["failure"] = null;
   if (item.failure !== null) {
-    if (!item.failure || typeof item.failure !== "object") return false;
-    const failure = item.failure as Record<string, unknown>;
+    if (!item.failure || typeof item.failure !== "object") return null;
+    const candidate = item.failure as Record<string, unknown>;
     if (
-      !failureCategories.has(failure.category as string) ||
-      typeof failure.at !== "string"
+      !failureCategories.has(candidate.category as string) ||
+      typeof candidate.at !== "string"
     ) {
-      return false;
+      return null;
     }
+    failure = {
+      category: candidate.category as SessionBriefFailureCategory,
+      at: candidate.at,
+    };
   }
-  if (item.lastGood === null) return true;
-  if (!item.lastGood || typeof item.lastGood !== "object") return false;
-  const brief = item.lastGood as Record<string, unknown>;
-  return (
-    typeof brief.sourceUpdatedAt === "string" &&
-    typeof brief.generatedAt === "string" &&
-    brief.generator === "codex_app_server" &&
-    brief.modelId === "gpt-5.6-sol" &&
-    typeof brief.currentState === "string" &&
-    brief.currentState.trim().length > 0 &&
-    strings(brief.done) &&
-    strings(brief.operatorActions) &&
-    strings(brief.blockers) &&
-    confidenceValues.has(brief.confidence as string) &&
-    strings(brief.evidence)
-  );
+  const lastGood = parseLastGood(item.lastGood);
+  if (lastGood === undefined) return null;
+  return {
+    threadId: item.threadId,
+    targetUpdatedAt: item.targetUpdatedAt,
+    analysisStatus: item.analysisStatus as SessionBriefAnalysisStatus,
+    freshness: item.freshness as SessionBriefFreshness,
+    lastGood,
+    failure,
+    queuedAt: item.queuedAt as string | null,
+    startedAt: item.startedAt as string | null,
+    updatedAt: item.updatedAt,
+  };
 }
 
-function isSnapshot(value: unknown): value is SessionBriefSnapshot {
-  if (!value || typeof value !== "object") return false;
-  const snapshot = value as Partial<SessionBriefSnapshot>;
-  return (
-    Array.isArray(snapshot.items) &&
-    snapshot.items.length <= 10 &&
-    snapshot.items.every(isItem) &&
-    typeof snapshot.total === "number" &&
-    snapshot.total === snapshot.items.length &&
-    typeof snapshot.queued === "number" &&
-    typeof snapshot.analyzing === "number" &&
-    typeof snapshot.ready === "number" &&
-    typeof snapshot.stale === "number" &&
-    typeof snapshot.unavailable === "number" &&
-    typeof snapshot.failed === "number" &&
-    typeof snapshot.selectedAt === "string" &&
-    !!snapshot.observer &&
-    observerStates.has(snapshot.observer.state) &&
-    observerCapabilities.has(snapshot.observer.capability)
-  );
+function finiteCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 export function parseSessionBriefSnapshot(value: unknown): SessionBriefSnapshot {
-  if (!isSnapshot(value)) {
+  if (!value || typeof value !== "object") {
     throw new Error("The session-brief response could not be read.");
   }
-  return value;
+  const snapshot = value as Record<string, unknown>;
+  const rawObserver = snapshot.observer;
+  const items = Array.isArray(snapshot.items)
+    ? snapshot.items.map(parseItem)
+    : [];
+  if (
+    !Array.isArray(snapshot.items) ||
+    snapshot.items.length > 10 ||
+    items.some((item) => item === null) ||
+    !finiteCount(snapshot.total) ||
+    snapshot.total !== snapshot.items.length ||
+    !finiteCount(snapshot.queued) ||
+    !finiteCount(snapshot.analyzing) ||
+    !finiteCount(snapshot.ready) ||
+    !finiteCount(snapshot.stale) ||
+    !finiteCount(snapshot.unavailable) ||
+    !finiteCount(snapshot.failed) ||
+    typeof snapshot.selectedAt !== "string" ||
+    !rawObserver ||
+    typeof rawObserver !== "object" ||
+    !observerStates.has((rawObserver as Record<string, unknown>).state as string) ||
+    !observerCapabilities.has(
+      (rawObserver as Record<string, unknown>).capability as string,
+    )
+  ) {
+    throw new Error("The session-brief response could not be read.");
+  }
+  const observer = rawObserver as Record<string, unknown>;
+  return {
+    observer: {
+      state: observer.state as ObserverHealthState,
+      capability: observer.capability as ObserverMode,
+    },
+    selectedAt: snapshot.selectedAt,
+    items: items as SessionBriefItem[],
+    total: snapshot.total,
+    queued: snapshot.queued,
+    analyzing: snapshot.analyzing,
+    ready: snapshot.ready,
+    stale: snapshot.stale,
+    unavailable: snapshot.unavailable,
+    failed: snapshot.failed,
+  };
 }
 
 async function request(

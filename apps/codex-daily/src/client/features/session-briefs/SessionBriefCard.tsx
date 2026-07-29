@@ -1,5 +1,9 @@
+import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
-import type { ObservedThread } from "../../../shared/observer-types";
+import type {
+  ObservedThread,
+  ObserverHealthState,
+} from "../../../shared/observer-types";
 import type {
   SessionBriefAnalysisStatus,
   SessionBriefFailureCategory,
@@ -71,6 +75,7 @@ interface SessionBriefCardProps {
   thread: ObservedThread | null;
   timezone: string;
   canAnalyze: boolean;
+  observerState: ObserverHealthState;
   retryPending: boolean;
   linked: boolean;
   onRetry: (threadId: string) => void;
@@ -81,11 +86,19 @@ export function SessionBriefCard({
   thread,
   timezone,
   canAnalyze,
+  observerState,
   retryPending,
   linked,
   onRetry,
 }: SessionBriefCardProps) {
   const title = thread?.title ?? "Codex session";
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreRetryFocus = useRef(false);
+  const activityTimestamp =
+    thread?.lastActivityAt ??
+    thread?.recencyAt ??
+    thread?.updatedAt ??
+    item.targetUpdatedAt;
   const showRetry =
     item.analysisStatus === "failed" || item.analysisStatus === "unavailable";
   const lifecycleDetail =
@@ -98,6 +111,12 @@ export function SessionBriefCard({
           : item.analysisStatus === "failed"
             ? "GPT-5.6 brief generation failed"
             : "GPT-5.6 brief is ready";
+  useEffect(() => {
+    if (!retryPending && restoreRetryFocus.current) {
+      restoreRetryFocus.current = false;
+      retryButtonRef.current?.focus();
+    }
+  }, [retryPending]);
 
   return (
     <li className="session-brief-card" data-thread-id={item.threadId}>
@@ -107,14 +126,8 @@ export function SessionBriefCard({
         ) : (
           <StatusBadge tone="possibly-stale">Metadata refreshing</StatusBadge>
         )}
-        <time dateTime={thread?.recencyAt ?? thread?.updatedAt ?? item.targetUpdatedAt}>
-          {formatTime(
-            thread?.lastActivityAt ??
-              thread?.recencyAt ??
-              thread?.updatedAt ??
-              item.targetUpdatedAt,
-            timezone,
-          )}
+        <time dateTime={activityTimestamp}>
+          {formatTime(activityTimestamp, timezone)}
         </time>
       </div>
 
@@ -206,22 +219,36 @@ export function SessionBriefCard({
       {showRetry && (
         <div className="brief-retry">
           <button
+            ref={retryButtonRef}
             type="button"
             className="secondary-button"
             aria-label={`Retry brief for ${title}`}
-            disabled={!canAnalyze}
+            disabled={!canAnalyze || retryPending}
             aria-disabled={!canAnalyze || retryPending}
             onClick={() => {
-              if (!retryPending) onRetry(item.threadId);
+              if (!retryPending) {
+                restoreRetryFocus.current = true;
+                onRetry(item.threadId);
+              }
             }}
           >
-            {retryPending ? "Retrying brief…" : "Retry brief"}
+            {retryPending ? "Queuing retry…" : "Retry brief"}
           </button>
           {!canAnalyze && (
-            <span>Retry is unavailable while Codex is disconnected.</span>
+            <span>{retryUnavailableCopy(observerState)}</span>
           )}
         </div>
       )}
     </li>
   );
+}
+
+function retryUnavailableCopy(state: ObserverHealthState): string {
+  if (state === "connecting") {
+    return "Retry is unavailable while Codex is connecting.";
+  }
+  if (state === "reconnecting") {
+    return "Retry is unavailable while Codex is reconnecting.";
+  }
+  return "Retry is unavailable while Codex is disconnected.";
 }

@@ -80,8 +80,40 @@
 - Independent focused backend/frontend review suites passed
 - Whitespace, protected paths, and artifact privacy scans were clean
 
-## Resolution
+## Correction Resolution
 
-Return to `4_Implement` with one focused review-correction pass. Re-run the full
-web/browser/privacy/operational checks, then update this artifact with the
-correction commit and final review decision.
+Status: passed after correction
+
+Correction commit: `Review corrections: harden recent session briefs` (this
+status-bearing commit)
+
+The correction pass:
+
+- validates the actual returned `gpt-5.6-sol` model and ephemeral thread before
+  sending source text;
+- suppresses the candidate internal thread on rejected, malformed,
+  wrong-model, non-ephemeral, and contradictory notification/response paths;
+- binds `thread/read.updatedAt` to the desired revision and supersedes changed
+  work;
+- aborts in-memory work on source revision change and recent-window exit;
+- suppresses drain-time SSE publication until post-maintenance resume;
+- maps rejected source reads to `source_missing`;
+- reconstructs browser DTOs from an explicit allowlist;
+- corrects empty refresh, connection copy, timestamp, pending, and focus
+  behavior; and
+- adds the missing persistent overnight, deletion/rollback/late-promotion,
+  model-boundary, revision, cancellation, SSE, privacy, and UI regression
+  coverage.
+
+Post-correction verification:
+
+- `npm run check`: 43 files, 174 tests, lint/typecheck/build passed
+- Correction-focused suites: 51 tests passed before the final replay hardening
+- Gateway model/internal-thread boundary: 12/12 passed after final hardening
+- Full Playwright: 20 passed, 8 intentional mobile mutation skips
+- Operational/privacy focused suites: 13 tests passed
+- Built-artifact privacy scan, whitespace, and protected paths: clean
+- Host model proof: intentionally not rerun
+
+Final decision: all must-fix and should-fix review findings are resolved.
+Proceed to `6_Cleanup`.

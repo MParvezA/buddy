@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useObserver } from "../../data/observer-context";
 import { usePlanning } from "../../data/planning-context";
 import { useSessionBriefs } from "../../data/session-briefs-context";
@@ -24,10 +25,23 @@ export function RecentSessionBriefs() {
   const briefs = useSessionBriefs();
   const timezone = planning.view?.timezone ?? "Europe/Berlin";
   const snapshot = briefs.snapshot;
+  const refreshButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreRefreshFocus = useRef(false);
   const canAnalyze = snapshot?.observer.state === "connected";
+  const refreshDisabled =
+    !snapshot ||
+    !canAnalyze ||
+    snapshot.total === 0 ||
+    briefs.refreshingAll;
   const threads = new Map(
     (observer.snapshot?.threads ?? []).map((thread) => [thread.id, thread]),
   );
+  useEffect(() => {
+    if (!briefs.refreshingAll && restoreRefreshFocus.current) {
+      restoreRefreshFocus.current = false;
+      refreshButtonRef.current?.focus();
+    }
+  }, [briefs.refreshingAll]);
 
   return (
     <section
@@ -49,12 +63,16 @@ export function RecentSessionBriefs() {
               : "Loading"}
           </span>
           <button
+            ref={refreshButtonRef}
             type="button"
             className="primary-button"
-            disabled={!snapshot || !canAnalyze}
-            aria-disabled={!snapshot || !canAnalyze || briefs.refreshingAll}
+            disabled={refreshDisabled}
+            aria-disabled={refreshDisabled}
             onClick={() => {
-              if (!briefs.refreshingAll) void briefs.refreshAll();
+              if (!briefs.refreshingAll) {
+                restoreRefreshFocus.current = true;
+                void briefs.refreshAll();
+              }
             }}
           >
             {briefs.refreshingAll ? "Refreshing 10 briefs…" : "Refresh 10 briefs"}
@@ -108,6 +126,7 @@ export function RecentSessionBriefs() {
                 thread={thread}
                 timezone={timezone}
                 canAnalyze={canAnalyze}
+                observerState={snapshot.observer.state}
                 retryPending={briefs.pendingThreadIds.has(item.threadId)}
                 linked={
                   observer.snapshot?.taskLinks.some(

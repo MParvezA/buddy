@@ -25,6 +25,7 @@ def thread(thread_id, **overrides):
         "parentThreadId": None,
         "preview": "SECRET PREVIEW MUST NEVER BE STORED",
         "ephemeral": False,
+        "model": "gpt-5.6-sol",
         "modelProvider": "openai",
         "createdAt": 1785312000,
         "updatedAt": 1785320000 if thread_id == "thread-two" else 1785319200,
@@ -293,12 +294,32 @@ for line in sys.stdin:
             threading.Timer(0.01, live_fact).start()
     elif method == "thread/read":
         source_thread_id = message["params"]["threadId"]
+        if analysis_mode == "source_missing":
+            send(
+                {
+                    "id": message["id"],
+                    "error": {"code": -32001, "message": "thread not found"},
+                }
+            )
+            continue
+        source_inventory = next(
+            (
+                candidate
+                for candidate in ordinary_threads()
+                if candidate["id"] == source_thread_id
+            ),
+            thread(source_thread_id),
+        )
+        source_updated_at = source_inventory["updatedAt"]
+        if analysis_mode == "source_changed" and source_thread_id == "thread-one":
+            source_updated_at += 300
         send(
             {
                 "id": message["id"],
                 "result": {
                     "thread": thread(
                         source_thread_id,
+                        updatedAt=source_updated_at,
                         turns=[
                             {
                                 "id": "turn-intent",
@@ -339,9 +360,6 @@ for line in sys.stdin:
     elif method == "thread/start":
         params = message.get("params", {})
         is_analysis = params.get("ephemeral") is True
-        if is_analysis and analysis_mode == "unavailable":
-            send({"id": message["id"], "error": {"code": -32000, "message": "model unavailable"}})
-            continue
         if is_analysis:
             analysis_thread_count += 1
             created_thread_id = f"codex-daily-analysis-{analysis_thread_count}"
@@ -357,21 +375,60 @@ for line in sys.stdin:
                 "params": {
                     "thread": thread(
                         created_thread_id,
-                        ephemeral=is_analysis,
+                        ephemeral=(
+                            False
+                            if is_analysis
+                            and analysis_mode == "contradictory_durable"
+                            else is_analysis
+                        ),
                         source="appServer",
                     )
                 },
             }
         )
-        threading.Timer(
-            0.05,
-            lambda request_id=message["id"], thread_id=created_thread_id: send(
-                {
-                    "id": request_id,
-                    "result": {"thread": thread(thread_id)},
-                }
-            ),
-        ).start()
+        if is_analysis and analysis_mode == "unavailable":
+            threading.Timer(
+                0.05,
+                lambda request_id=message["id"]: send(
+                    {
+                        "id": request_id,
+                        "error": {"code": -32000, "message": "model unavailable"},
+                    }
+                ),
+            ).start()
+        else:
+            response_ephemeral = (
+                False
+                if is_analysis
+                and analysis_mode in ("durable", "contradictory_durable")
+                else is_analysis
+            )
+            response_model = (
+                "gpt-5.6-terra"
+                if is_analysis and analysis_mode == "wrong_model"
+                else "gpt-5.6-sol"
+            )
+            response_thread = (
+                {"id": created_thread_id}
+                if is_analysis and analysis_mode == "malformed"
+                else thread(
+                    created_thread_id,
+                    ephemeral=response_ephemeral,
+                    model=response_model,
+                )
+            )
+            threading.Timer(
+                0.05,
+                lambda request_id=message["id"], response=response_thread: send(
+                    {
+                        "id": request_id,
+                        "result": {
+                            "model": response_model,
+                            "thread": response,
+                        },
+                    }
+                ),
+            ).start()
     elif method == "turn/start":
         reporting_thread_id = message["params"]["threadId"]
         is_analysis = reporting_thread_id in analysis_threads

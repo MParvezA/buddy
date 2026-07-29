@@ -5,6 +5,7 @@ import {
 } from "../codex/observer-service.js";
 import {
   SessionBriefAnalysisError,
+  SessionBriefSourceSupersededError,
   type SessionBriefAnalysisInput,
   type SessionBriefAnalysisResult,
   type SessionBriefAnalyzer,
@@ -29,7 +30,10 @@ const SOURCE_HEADER = "\n\nBEGIN UNTRUSTED CHAT DATA\n";
 const SOURCE_FOOTER = "\nEND UNTRUSTED CHAT DATA";
 
 export interface SessionBriefGatewayObserver {
-  readSessionBriefSource(threadId: string, signal?: AbortSignal): Promise<unknown[]>;
+  readSessionBriefSource(
+    threadId: string,
+    signal?: AbortSignal,
+  ): Promise<{ turns: unknown[]; sourceUpdatedAt: string }>;
   createSessionBriefAnalysisThread(signal?: AbortSignal): Promise<string>;
   runSessionBriefAnalysisTurn(
     threadId: string,
@@ -47,9 +51,9 @@ export class SessionBriefGateway implements SessionBriefAnalyzer {
   ) {}
 
   async analyze(input: SessionBriefAnalysisInput): Promise<SessionBriefAnalysisResult> {
-    let turns: unknown[];
+    let source: { turns: unknown[]; sourceUpdatedAt: string };
     try {
-      turns = await this.observer.readSessionBriefSource(input.threadId, input.signal);
+      source = await this.observer.readSessionBriefSource(input.threadId, input.signal);
     } catch (error) {
       if (error instanceof ObserverNotFoundError) {
         throw new SessionBriefAnalysisError("source_missing", false);
@@ -62,11 +66,14 @@ export class SessionBriefGateway implements SessionBriefAnalyzer {
       }
       throw new SessionBriefAnalysisError("observer_unavailable", true);
     }
+    if (source.sourceUpdatedAt !== input.sourceUpdatedAt) {
+      throw new SessionBriefSourceSupersededError(source.sourceUpdatedAt);
+    }
 
     const fixedPrompt = `${PROMPT_PREFIX}${SOURCE_HEADER}${SOURCE_FOOTER}`;
     const sourceBudget =
       MAX_SESSION_BRIEF_INPUT_CODE_POINTS - Array.from(fixedPrompt).length - 300;
-    const extracted = extractSessionBriefInput(turns, sourceBudget);
+    const extracted = extractSessionBriefInput(source.turns, sourceBudget);
     if (!extracted) {
       throw new SessionBriefAnalysisError("empty_usable_content", false);
     }

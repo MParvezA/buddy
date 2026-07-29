@@ -16,9 +16,14 @@ import {
 } from "./activity-normalizer.js";
 import {
   AppServerClient,
+  AppServerRequestError,
   type ProcessFactory,
 } from "./app-server-client.js";
-import type { ProtocolMethodEnvelope } from "./app-server-protocol.js";
+import {
+  isObject,
+  type ProtocolMethodEnvelope,
+  unixSeconds,
+} from "./app-server-protocol.js";
 
 export interface ObserverServiceOptions {
   repository: ObserverRepository;
@@ -296,16 +301,27 @@ export class ObserverService extends EventEmitter {
   async readSessionBriefSource(
     threadId: string,
     signal?: AbortSignal,
-  ): Promise<unknown[]> {
+  ): Promise<{ turns: unknown[]; sourceUpdatedAt: string }> {
     if (this.repository.isExcluded(threadId) || this.ephemeralInternalThreadIds.has(threadId)) {
       throw new ObserverNotFoundError("The observed thread was not found.");
     }
     const client = this.connectedClient();
-    const result = await client.request(
-      "thread/read",
-      { threadId, includeTurns: true },
-      signal,
-    );
+    let result: unknown;
+    try {
+      result = await client.request(
+        "thread/read",
+        { threadId, includeTurns: true },
+        signal,
+      );
+    } catch (error) {
+      if (
+        error instanceof AppServerRequestError &&
+        error.category === "rejected"
+      ) {
+        throw new ObserverNotFoundError("The observed thread was not found.");
+      }
+      throw error;
+    }
     const raw = assertThreadReadResponse(result);
     if (
       raw.id !== threadId ||
@@ -313,13 +329,26 @@ export class ObserverService extends EventEmitter {
     ) {
       throw new ObserverInternalTurnError("invalid_output");
     }
-    return raw.turns;
+    const sourceUpdatedAt = unixSeconds(raw.updatedAt);
+    const stored = this.repository.findThread(threadId);
+    if (stored && stored.updatedAt !== sourceUpdatedAt) {
+      const normalized = normalizeThread(raw, stored.archived, this.clock);
+      if (!normalized || normalized.id !== threadId) {
+        throw new ObserverInternalTurnError("invalid_output");
+      }
+      if (this.repository.upsertThread(normalized)) this.publish();
+    }
+    return {
+      turns: raw.turns,
+      sourceUpdatedAt,
+    };
   }
 
   async createSessionBriefAnalysisThread(signal?: AbortSignal): Promise<string> {
     return this.withInventoryCreationLock(async () => {
       const client = this.connectedClient();
       this.internalThreadCreationBuffer = [];
+      let candidateThreadId: string | null = null;
       try {
         const result = await client.requestInternal(
           "thread/start",
@@ -336,16 +365,26 @@ export class ObserverService extends EventEmitter {
           },
           signal,
         );
-        const value = result as { thread?: { id?: unknown } };
-        const id = value?.thread?.id;
-        if (typeof id !== "string" || !id) {
+        const value = result as {
+          model?: unknown;
+          thread?: { id?: unknown; ephemeral?: unknown };
+        };
+        const thread = value?.thread;
+        const id = thread?.id;
+        candidateThreadId =
+          typeof id === "string" && id ? id : null;
+        if (
+          !candidateThreadId ||
+          value.model !== "gpt-5.6-sol" ||
+          thread?.ephemeral !== true
+        ) {
           throw new ObserverInternalTurnError("invalid_output");
         }
-        this.ephemeralInternalThreadIds.add(id);
-        this.replayInternalCreationBuffer(id);
-        return id;
+        this.ephemeralInternalThreadIds.add(candidateThreadId);
+        this.replayInternalCreationBuffer(candidateThreadId);
+        return candidateThreadId;
       } catch (error) {
-        this.replayInternalCreationBuffer(null);
+        this.replayInternalCreationBuffer(candidateThreadId, true);
         throw error;
       }
     });
@@ -566,13 +605,33 @@ export class ObserverService extends EventEmitter {
     }
   }
 
-  private replayInternalCreationBuffer(internalThreadId: string | null): void {
+  private replayInternalCreationBuffer(
+    internalThreadId: string | null,
+    suppressEphemeralStarted = false,
+  ): void {
     const buffered = this.internalThreadCreationBuffer ?? [];
     this.internalThreadCreationBuffer = null;
+    const ephemeralThreadIds = new Set<string>();
+    if (suppressEphemeralStarted) {
+      for (const { envelope } of buffered) {
+        if (envelope.method !== "thread/started" || !isObject(envelope.params)) {
+          continue;
+        }
+        const thread = envelope.params.thread;
+        if (
+          isObject(thread) &&
+          thread.ephemeral === true &&
+          typeof thread.id === "string"
+        ) {
+          ephemeralThreadIds.add(thread.id);
+        }
+      }
+    }
     for (const { envelope, requestEpisodeNamespace } of buffered) {
+      const envelopeThreadId = protocolThreadId(envelope);
       if (
-        internalThreadId &&
-        protocolThreadId(envelope) === internalThreadId
+        (internalThreadId && envelopeThreadId === internalThreadId) ||
+        (envelopeThreadId && ephemeralThreadIds.has(envelopeThreadId))
       ) {
         continue;
       }

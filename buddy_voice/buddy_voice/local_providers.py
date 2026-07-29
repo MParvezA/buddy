@@ -295,7 +295,13 @@ class PipeWirePushToTalkAudioInput:
         directory = self._temp_directory or Path('/tmp')
         directory.mkdir(parents=True, exist_ok=True)
         audio_path = directory / f'buddy-ptt-{os.getpid()}-{time.monotonic_ns()}.wav'
-        argv = [self._record_binary, '--format', 's16', '--rate', '16000', '--channels', '1']
+        # pw-record/pw-play are commonly symlinks to pw-cat. Always request the
+        # operation explicitly because executable resolution intentionally
+        # yields the pw-cat target rather than the wrapper basename.
+        argv = [
+            self._record_binary, '--record', '--format', 's16', '--rate', '16000',
+            '--channels', '1',
+        ]
         if self._device:
             argv.extend(['--target', self._device])
         argv.append(str(audio_path))
@@ -526,7 +532,7 @@ class PiperTextToSpeechProvider:
         """Play a synthesized WAV and terminate PipeWire promptly on cancellation."""
         if speech.audio_path is None or not speech.audio_path.is_file():
             raise SpeechPlaybackError('Piper playback WAV is unavailable')
-        argv = [self._playback_binary]
+        argv = [self._playback_binary, '--playback']
         if self._sink:
             argv.extend(['--target', self._sink])
         argv.append(str(speech.audio_path))

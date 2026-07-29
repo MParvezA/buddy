@@ -77,8 +77,8 @@ sys.exit(7)
 
 
 def test_pipewire_capture_returns_valid_temporary_wav(tmp_path: Path) -> None:
-    """Capture sends SIGINT first and escalates to TERM when it is ignored."""
-    recorder = _script(tmp_path / 'pw-record', """
+    """pw-record resolving to pw-cat still selects record and stops safely."""
+    pipewire_cat = _script(tmp_path / 'pw-cat', """
 import json, signal, sys, time, wave
 path = sys.argv[-1]
 open(path + '.argv', 'w').write(json.dumps(sys.argv[1:]))
@@ -94,6 +94,8 @@ signal.signal(signal.SIGINT, lambda *_: signals.append('INT'))
 signal.signal(signal.SIGTERM, stop)
 while True: time.sleep(0.01)
 """)
+    recorder = tmp_path / 'pw-record'
+    recorder.symlink_to(pipewire_cat)
     source = PipeWirePushToTalkAudioInput(
         record_binary=recorder, device='WH-CH520', maximum_capture_seconds=1,
         locale='de-DE', temp_directory=tmp_path)
@@ -108,7 +110,7 @@ while True: time.sleep(0.01)
     assert capture.locale == 'de-DE'
     assert capture.audio_path is not None and capture.audio_path.exists()
     assert json.loads((Path(str(capture.audio_path) + '.argv')).read_text())[:-1] == [
-        '--format', 's16', '--rate', '16000', '--channels', '1', '--target', 'WH-CH520']
+        '--record', '--format', 's16', '--rate', '16000', '--channels', '1', '--target', 'WH-CH520']
     assert Path(str(capture.audio_path) + '.signals').read_text() == 'INT TERM'
 
 
@@ -215,11 +217,14 @@ with wave.open(path, 'wb') as output:
     output.setnchannels(1); output.setsampwidth(2); output.setframerate(22050)
     output.writeframes(b'\\0\\0' * 320)
 """)
-    player = _script(tmp_path / 'pw-play', """
-import signal, time
+    pipewire_cat = _script(tmp_path / 'pw-cat', """
+import json, signal, sys, time
+open(sys.argv[-1] + '.play.argv', 'w').write(json.dumps(sys.argv[1:]))
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
 while True: time.sleep(0.01)
 """)
+    player = tmp_path / 'pw-play'
+    player.symlink_to(pipewire_cat)
     en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
     de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
     provider = PiperTextToSpeechProvider(
@@ -238,6 +243,8 @@ while True: time.sleep(0.01)
     Thread(target=lambda: (time.sleep(0.05), cancelled.set())).start()
     with pytest.raises(SpeechPlaybackCancelled):
         provider.play(speech, cancel_event=cancelled, deadline_monotonic=time.monotonic() + 1.0)
+    assert json.loads((Path(str(speech.audio_path) + '.play.argv')).read_text()) == [
+        '--playback', str(speech.audio_path)]
     provider.cleanup(speech)
     assert not speech.audio_path.exists()
     with pytest.raises(Exception, match='unknown configured voice'):

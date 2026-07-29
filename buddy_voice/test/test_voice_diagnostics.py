@@ -1,10 +1,9 @@
 """Deterministic provider-failure diagnostics for the voice input boundary."""
 
-import pytest
-
-from diagnostic_msgs.msg import DiagnosticStatus
 from buddy_voice.providers import FakeAudioInput, FakeSpeechToTextProvider, Transcript
 from buddy_voice.voice_node import BuddyVoiceNode, DIAGNOSTIC_NAME, validate_capture_poll_period
+from diagnostic_msgs.msg import DiagnosticStatus
+import pytest
 import rclpy
 
 
@@ -156,6 +155,23 @@ def test_stt_provider_exception_is_diagnostic_and_recovers(initialized_rclpy) ->
         assert recovery_values['speech_to_text_ready'] == 'true'
         assert recovery_values['last_error_type'] == ''
         assert [message.text for message in utterances.messages] == ['hello buddy']
+        assert stops.messages == []
+    finally:
+        voice.destroy_node()
+
+
+def test_terminal_capture_failure_uses_public_diagnostic_boundary(initialized_rclpy) -> None:
+    """A terminal PTT exception publishes an error without voice or stop output."""
+    voice = BuddyVoiceNode(FakeAudioInput(), FakeSpeechToTextProvider())
+    diagnostics, utterances, stops = _install_recorders(voice)
+    try:
+        voice.report_provider_failure('audio_input', RuntimeError('device unavailable'))
+        status = diagnostics.messages[-1].status[0]
+        values = _diagnostic_values(diagnostics.messages[-1])
+        assert status.level == DiagnosticStatus.ERROR
+        assert status.message == 'audio_input provider failure'
+        assert values['last_error_message'] == 'device unavailable'
+        assert utterances.messages == []
         assert stops.messages == []
     finally:
         voice.destroy_node()

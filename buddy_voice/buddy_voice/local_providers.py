@@ -10,10 +10,10 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
-from threading import Event
+from threading import Event, Thread
 import time
-import wave
 from typing import Callable, Sequence
+import wave
 
 from .providers import (
     AudioCapture,
@@ -39,6 +39,7 @@ MAX_TTS_SYNTHESIS_TIMEOUT_SECONDS = 30
 MIN_TTS_PLAYBACK_TIMEOUT_SECONDS = 1
 MAX_TTS_PLAYBACK_TIMEOUT_SECONDS = 60
 SUPPORTED_STT_LANGUAGES = {'auto', 'en', 'de'}
+MAX_CHILD_OUTPUT_BYTES = 64 * 1024
 
 
 class LocalProviderError(RuntimeError):
@@ -126,41 +127,99 @@ def _asset(value: str | Path, label: str) -> Path:
     return path
 
 
-def _terminate(process: subprocess.Popen[str]) -> None:
-    """Terminate an owned process group and reap it within a short fixed bound."""
+@dataclass
+class _ChildProcess:
+    """An owned child with concurrently drained, bounded diagnostic output."""
+
+    process: subprocess.Popen[bytes]
+    stdout: bytearray
+    stderr: bytearray
+    stdout_truncated: list[bool]
+    stderr_truncated: list[bool]
+    drains: tuple[Thread, Thread]
+
+    def poll(self) -> int | None:
+        """Return the underlying child status without exposing its process API."""
+        return self.process.poll()
+
+
+def _drain(stream: object, output: bytearray, truncated: list[bool]) -> None:
+    """Drain a child stream continuously while retaining a fixed diagnostic prefix."""
+    while True:
+        chunk = stream.read(4096)
+        if not chunk:
+            return
+        available = MAX_CHILD_OUTPUT_BYTES - len(output)
+        if available > 0:
+            output.extend(chunk[:available])
+        if len(chunk) > available:
+            truncated[0] = True
+
+
+def _terminate(child: _ChildProcess, *, first_signal: int = signal.SIGTERM) -> None:
+    """Stop an owned group with the requested graceful signal, TERM, then KILL."""
+    process = child.process
     if process.poll() is not None:
         return
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        os.killpg(os.getpgid(process.pid), first_signal)
     except ProcessLookupError:
         return
     try:
         process.wait(timeout=0.25)
     except subprocess.TimeoutExpired:
+        if first_signal != signal.SIGTERM:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                return
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            process.wait(timeout=0.25)
         except ProcessLookupError:
             return
-        process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            process.wait(timeout=0.25)
 
 
-def _start(argv: list[str], *, stdin: bool = False) -> subprocess.Popen[str]:
-    """Start a local child with argv only, isolated for reliable termination."""
-    return subprocess.Popen(
+def _start(argv: list[str], *, stdin: bool = False) -> _ChildProcess:
+    """Start an argv-only child while draining bounded stdout/stderr concurrently."""
+    process = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         start_new_session=True,
+    )
+    stdout, stderr = bytearray(), bytearray()
+    stdout_truncated, stderr_truncated = [False], [False]
+    assert process.stdout is not None and process.stderr is not None
+    drains = (
+        Thread(target=_drain, args=(process.stdout, stdout, stdout_truncated), daemon=True),
+        Thread(target=_drain, args=(process.stderr, stderr, stderr_truncated), daemon=True),
+    )
+    for drain in drains:
+        drain.start()
+    return _ChildProcess(process, stdout, stderr, stdout_truncated, stderr_truncated, drains)
+
+
+def _finish(child: _ChildProcess) -> tuple[str, str]:
+    """Join stream drains and return bounded, explicitly truncated diagnostics."""
+    for drain in child.drains:
+        drain.join(0.25)
+    return (
+        _output_text(child.stdout, child.stdout_truncated[0]),
+        _output_text(child.stderr, child.stderr_truncated[0]),
     )
 
 
-def _finish(process: subprocess.Popen[str]) -> tuple[str, str]:
-    """Read bounded child streams after it has been reaped."""
-    stdout = process.stdout.read() if process.stdout is not None else ''
-    stderr = process.stderr.read() if process.stderr is not None else ''
-    return stdout, stderr
+def _output_text(output: bytearray, truncated: bool) -> str:
+    """Decode a retained output prefix without hiding truncation from diagnostics."""
+    suffix = ' [output truncated]' if truncated else ''
+    return output.decode(errors='replace') + suffix
 
 
 def _validate_wav(path: Path) -> float:
@@ -224,7 +283,9 @@ class PipeWirePushToTalkAudioInput:
             while process.poll() is None and not release_event.is_set() and time.monotonic() < deadline:
                 release_event.wait(min(0.05, max(0.0, deadline - time.monotonic())))
             if process.poll() is None:
-                _terminate(process)
+                # pw-record finalizes WAV headers on SIGINT; only escalate when
+                # it ignores the graceful stop request.
+                _terminate(process, first_signal=signal.SIGINT)
             _, stderr = _finish(process)
             if not audio_path.exists():
                 raise CaptureError(f'PipeWire capture produced no WAV: {stderr.strip()}')
@@ -249,6 +310,29 @@ def _transcript_from_json(payload: object, locale: str) -> str:
                 item.get('text', '') for item in segments
                 if isinstance(item, dict) and isinstance(item.get('text', ''), str)).strip()
     raise SttError(f'whisper.cpp returned invalid JSON transcript for {locale}')
+
+
+def _auto_locale_from_json(payload: object, fallback_locale: str) -> str:
+    """Map whisper's detected English/German language or use an explicit fallback."""
+    if not isinstance(payload, dict):
+        return fallback_locale
+    result = payload.get('result')
+    candidates = [payload.get('language')]
+    if isinstance(result, dict):
+        candidates.append(result.get('language'))
+    detected = next((item for item in candidates if item is not None), None)
+    if detected is None:
+        return fallback_locale
+    if isinstance(detected, dict):
+        detected = detected.get('code')
+    if not isinstance(detected, str):
+        raise SttError('whisper.cpp returned an invalid detected language')
+    language = detected.lower()
+    if language == 'en':
+        return 'en-US'
+    if language == 'de':
+        return 'de-DE'
+    raise SttError(f'whisper.cpp detected unsupported language: {detected}')
 
 
 class WhisperCppSpeechToTextProvider:
@@ -277,7 +361,7 @@ class WhisperCppSpeechToTextProvider:
         output_json = output_base.with_suffix('.json')
         argv = [self._binary, '-m', str(self._model), '-f', str(audio_path), '-t', str(self._threads),
                 '-l', self._language, '-oj', '-of', str(output_base)]
-        process: subprocess.Popen[str] | None = None
+        process: _ChildProcess | None = None
         try:
             process = _start(argv)
             deadline = time.monotonic() + self._timeout_seconds
@@ -287,8 +371,9 @@ class WhisperCppSpeechToTextProvider:
                     raise SttError('whisper.cpp transcription timed out')
                 time.sleep(0.01)
             _, stderr = _finish(process)
-            if process.returncode != 0:
-                raise SttError(f'whisper.cpp exited with {process.returncode}: {stderr.strip()}')
+            if process.process.returncode != 0:
+                raise SttError(
+                    f'whisper.cpp exited with {process.process.returncode}: {stderr.strip()}')
             try:
                 payload = json.loads(output_json.read_text(encoding='utf-8'))
             except (OSError, json.JSONDecodeError) as error:
@@ -296,11 +381,17 @@ class WhisperCppSpeechToTextProvider:
             text = _transcript_from_json(payload, capture.locale)
             if not text:
                 raise SttError('whisper.cpp produced an empty final transcript')
-            locale = 'de-DE' if self._language == 'de' else ('en-US' if self._language == 'en' else capture.locale)
+            locale = (
+                'de-DE' if self._language == 'de'
+                else 'en-US' if self._language == 'en'
+                else _auto_locale_from_json(payload, capture.locale)
+            )
             return [Transcript(text, 1.0, True, locale)]
         finally:
             if process is not None and process.poll() is None:
                 _terminate(process)
+            if process is not None:
+                _finish(process)
             audio_path.unlink(missing_ok=True)
             output_json.unlink(missing_ok=True)
 
@@ -373,13 +464,13 @@ class PiperTextToSpeechProvider:
         wav_path = directory / f'buddy-piper-{os.getpid()}-{time.monotonic_ns()}.wav'
         argv = [self._piper_binary, '--model', str(selected.model), '--config', str(selected.config),
                 '--output_file', str(wav_path)]
-        process: subprocess.Popen[str] | None = None
+        process: _ChildProcess | None = None
         deadline = min(deadline_monotonic, time.monotonic() + self._synthesis_timeout_seconds)
         try:
             process = _start(argv, stdin=True)
-            assert process.stdin is not None
-            process.stdin.write(text)
-            process.stdin.close()
+            assert process.process.stdin is not None
+            process.process.stdin.write(text.encode())
+            process.process.stdin.close()
             while process.poll() is None:
                 if cancel_event.is_set():
                     _terminate(process)
@@ -389,8 +480,9 @@ class PiperTextToSpeechProvider:
                     raise SpeechSynthesisTimeout('Piper synthesis timed out')
                 time.sleep(0.01)
             _, stderr = _finish(process)
-            if process.returncode != 0:
-                raise SpeechSynthesisError(f'Piper exited with {process.returncode}: {stderr.strip()}')
+            if process.process.returncode != 0:
+                raise SpeechSynthesisError(
+                    f'Piper exited with {process.process.returncode}: {stderr.strip()}')
             duration = _validate_wav(wav_path)
             return SynthesizedSpeech(duration, wav_path)
         except (SpeechSynthesisCancelled, SpeechSynthesisTimeout, SpeechSynthesisError):
@@ -402,6 +494,8 @@ class PiperTextToSpeechProvider:
         finally:
             if process is not None and process.poll() is None:
                 _terminate(process)
+            if process is not None:
+                _finish(process)
 
     def play(self, speech: SynthesizedSpeech, *, cancel_event: Event, deadline_monotonic: float) -> None:
         """Play a synthesized WAV and terminate PipeWire promptly on cancellation."""
@@ -426,12 +520,13 @@ class PiperTextToSpeechProvider:
                     raise SpeechPlaybackTimeout('PipeWire playback timed out')
                 time.sleep(0.01)
             _, stderr = _finish(process)
-            if process.returncode != 0:
+            if process.process.returncode != 0:
                 raise SpeechPlaybackError(
-                    f'PipeWire playback exited with {process.returncode}: {stderr.strip()}')
+                    f'PipeWire playback exited with {process.process.returncode}: {stderr.strip()}')
         finally:
             if process.poll() is None:
                 _terminate(process)
+            _finish(process)
 
     def cleanup(self, speech: SynthesizedSpeech) -> None:
         """Delete the provider-owned WAV after every terminal action outcome."""

@@ -10,10 +10,12 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { ThreadDetailPage } from "./pages/ThreadDetailPage";
 import { ReportProvider } from "./data/report-context";
 import { ReportDetailPage } from "./pages/ReportDetailPage";
+import { SessionBriefProvider } from "./data/session-briefs-context";
 
 export function App() {
   return (
     <ObserverProvider>
+      <SessionBriefProvider>
         <AttentionProvider>
           <PlanningProvider>
             <ReportProvider>
@@ -30,6 +32,7 @@ export function App() {
             </ReportProvider>
           </PlanningProvider>
         </AttentionProvider>
+      </SessionBriefProvider>
     </ObserverProvider>
   );
 }

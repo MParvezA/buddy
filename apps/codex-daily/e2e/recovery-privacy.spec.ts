@@ -7,7 +7,7 @@ test("settings stays keyboard-usable and responsive with privacy-safe diagnostic
   await expect(
     page.getByRole("heading", { name: "Inspect and manage retained data" }),
   ).toBeVisible();
-  await expect(page.getByText(/schema 005_operational_hardening\.sql/)).toBeVisible();
+  await expect(page.getByText(/schema 006_session_briefs\.sql/)).toBeVisible();
   await expect(page.getByText(/foreign-key violations/)).toBeVisible();
   await expect(page.getByRole("link", { name: "Export JSON" })).toBeVisible();
   expect(

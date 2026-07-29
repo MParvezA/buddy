@@ -13,6 +13,7 @@ import {
 import { ObserverRepository } from "../../../src/server/storage/observer-repository.js";
 import { PlanningRepository } from "../../../src/server/storage/planning-repository.js";
 import type { ObservedThread } from "../../../src/shared/observer-types.js";
+import { SessionBriefRepository } from "../../../src/server/briefs/session-brief-repository.js";
 
 let database: PlanningDatabase | undefined;
 
@@ -59,6 +60,7 @@ function setup() {
     pauseWriters,
     resumeWriters,
   });
+  const briefs = new SessionBriefRepository(db, () => "brief-job");
   return {
     db,
     planning,
@@ -66,6 +68,7 @@ function setup() {
     attention,
     reports,
     privacy,
+    briefs,
     pauseWriters,
     resumeWriters,
   };
@@ -83,6 +86,35 @@ describe("local monitor privacy operations", () => {
       now: "2026-07-29T08:00:00.000Z",
     });
     value.observer.upsertThread(observedThread());
+    const briefJob = value.briefs.enqueue(
+      "thread-one",
+      "2026-07-29T00:00:00.000Z",
+      "automatic",
+      "2026-07-29T10:03:00.000Z",
+    )!;
+    value.briefs.markAnalyzing(
+      briefJob.jobId,
+      "2026-07-29T10:04:00.000Z",
+    );
+    value.briefs.promote(
+      briefJob.jobId,
+      briefJob.threadId,
+      briefJob.targetUpdatedAt,
+      {
+        content: {
+          currentState:
+            "Session metadata is ready for future GPT-5.6 analysis.",
+          done: [],
+          operatorActions: [],
+          blockers: [],
+          confidence: "low",
+          evidence: [],
+        },
+        generator: "deterministic_placeholder",
+        modelId: null,
+      },
+      "2026-07-29T10:05:00.000Z",
+    );
     value.observer.addActivity({
       sourceKey: "turn:thread-one:turn-one:completed",
       threadId: "thread-one",
@@ -119,12 +151,22 @@ describe("local monitor privacy operations", () => {
     const exported = value.privacy.export();
     expect(exported).toMatchObject({
       product: "codex-daily",
-      schemaVersion: 1,
+      schemaVersion: 2,
       days: [{ localDate: "2026-07-29", timezone: "Europe/Berlin" }],
       tasks: [{ id: task.id }],
       taskLinks: [{ taskId: task.id, threadId: "thread-one" }],
       observerExclusions: [{ threadId: "reporting-thread", reason: "reporting" }],
       reportingRoles: [{ threadId: "reporting-thread", role: "daily_reporter" }],
+      sessionBriefs: [
+        {
+          threadId: "thread-one",
+          lastGood: {
+            generator: "deterministic_placeholder",
+            modelId: null,
+          },
+        },
+      ],
+      sessionBriefJobs: [],
     });
     expect(exported.activities).toHaveLength(1);
     expect(exported.attention).toHaveLength(1);
@@ -147,11 +189,13 @@ describe("local monitor privacy operations", () => {
       "suggestions",
       "observerExclusions",
       "reportingRoles",
+      "sessionBriefs",
+      "sessionBriefJobs",
       "preferences",
     ]);
     expect(value.privacy.databaseHealth()).toMatchObject({
       status: "ok",
-      schemaVersion: "005_operational_hardening.sql",
+      schemaVersion: "006_session_briefs.sql",
       foreignKeyViolations: 0,
     });
   });
@@ -183,6 +227,35 @@ describe("local monitor privacy operations", () => {
       now: "2026-07-29T00:01:00.000Z",
     });
     value.observer.upsertThread(observedThread());
+    const dayBrief = value.briefs.enqueue(
+      "thread-one",
+      "2026-07-29T00:00:00.000Z",
+      "automatic",
+      "2026-07-29T01:00:00.000Z",
+    )!;
+    value.briefs.markAnalyzing(
+      dayBrief.jobId,
+      "2026-07-29T01:01:00.000Z",
+    );
+    value.briefs.promote(
+      dayBrief.jobId,
+      dayBrief.threadId,
+      dayBrief.targetUpdatedAt,
+      {
+        content: {
+          currentState:
+            "Session metadata is ready for future GPT-5.6 analysis.",
+          done: [],
+          operatorActions: [],
+          blockers: [],
+          confidence: "low",
+          evidence: [],
+        },
+        generator: "deterministic_placeholder",
+        modelId: null,
+      },
+      "2026-07-29T01:02:00.000Z",
+    );
     value.observer.addActivity({
       sourceKey: "activity-in-berlin-day",
       threadId: "thread-one",
@@ -232,6 +305,8 @@ describe("local monitor privacy operations", () => {
     expect(value.planning.findTask(source.id)).toBeNull();
     expect(value.planning.findTask(successor.id)?.originTaskId).toBeNull();
     expect(value.observer.listActivities()).toEqual([]);
+    expect(value.privacy.export().sessionBriefs).toEqual([]);
+    expect(value.privacy.export().sessionBriefJobs).toEqual([]);
     expect(value.observer.findThread("thread-one")?.lastActivityAt).toBeNull();
     value.observer.updateRuntime(
       "thread-one",

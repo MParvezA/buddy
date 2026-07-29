@@ -2,6 +2,11 @@ import type { AttentionItem } from "./attention.js";
 import type { ObservedActivity, ObservedThread, TaskThreadLink } from "./observer-types.js";
 import type { PlanningTask } from "./planning.js";
 import type { ReportSchedule, ReportSnapshot, ReportTrigger } from "./report.js";
+import type {
+  SessionBriefLastGood,
+  SessionBriefFailureCategory,
+  SessionBriefJobReason,
+} from "./session-briefs.js";
 
 export interface RetainedCategoryCount {
   category:
@@ -17,6 +22,8 @@ export interface RetainedCategoryCount {
     | "suggestions"
     | "observerExclusions"
     | "reportingRoles"
+    | "sessionBriefs"
+    | "sessionBriefJobs"
     | "preferences";
   count: number;
 }
@@ -82,7 +89,7 @@ export interface ExportReviewDecision {
 
 export interface CodexDailyExport {
   product: "codex-daily";
-  schemaVersion: 1;
+  schemaVersion: 2;
   exportedAt: string;
   schedule: ReportSchedule;
   days: Array<{
@@ -108,6 +115,25 @@ export interface CodexDailyExport {
     threadId: string;
     role: "daily_reporter";
     createdAt: string;
+  }>;
+  sessionBriefs: Array<{
+    threadId: string;
+    lastGood: SessionBriefLastGood;
+    updatedAt: string;
+    outOfWindowAt: string | null;
+  }>;
+  sessionBriefJobs: Array<{
+    threadId: string;
+    jobId: string;
+    targetUpdatedAt: string;
+    reason: SessionBriefJobReason;
+    status: "queued" | "analyzing" | "unavailable" | "failed";
+    attemptCount: number;
+    queuedAt: string;
+    startedAt: string | null;
+    failureCategory: SessionBriefFailureCategory | null;
+    failureAt: string | null;
+    updatedAt: string;
   }>;
 }
 

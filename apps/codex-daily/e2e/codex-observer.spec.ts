@@ -28,4 +28,31 @@ test("observer discovers paginated chats, links a task, and reads detail transie
   await expect(page.getByText("1 turns fetched in request memory")).toBeVisible();
   const observerResponse = await page.request.get("/api/observer");
   expect(await observerResponse.text()).not.toMatch(/SECRET RESPONSE|SECRET PREVIEW|turns/);
+
+  const briefsResponse = await page.request.get("/api/session-briefs");
+  expect(briefsResponse.ok()).toBe(true);
+  expect(briefsResponse.headers()["cache-control"]).toBe("no-store");
+  const briefsBody = await briefsResponse.text();
+  expect(briefsBody).toContain("deterministic_placeholder");
+  expect(briefsBody).not.toMatch(
+    /SECRET RESPONSE|SECRET PREVIEW|rawProtocol|prompt|reasoning|turns/,
+  );
+
+  const liveBrief = await page.evaluate(
+    () =>
+      new Promise<string>((resolve, reject) => {
+        const events = new EventSource("/api/session-briefs/events");
+        const timer = window.setTimeout(() => {
+          events.close();
+          reject(new Error("Session brief SSE did not publish."));
+        }, 5_000);
+        events.addEventListener("session-briefs", (event) => {
+          window.clearTimeout(timer);
+          events.close();
+          resolve((event as MessageEvent<string>).data);
+        });
+      }),
+  );
+  expect(liveBrief).toContain("deterministic_placeholder");
+  expect(liveBrief).not.toMatch(/SECRET RESPONSE|SECRET PREVIEW|prompt|reasoning|turns/);
 });

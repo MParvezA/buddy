@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 01: Brief Contract And Storage` (this status-bearing commit)
+Verification: `npm run check` passed with 36 files/121 tests; full Playwright passed 16 runnable flows with 6 intentional mobile duplicate-flow skips; the production smoke returned 10 placeholder briefs with `Cache-Control: no-store`, schema migration 006, and zero foreign-key violations; repository contracts passed 4/4; `colcon list` remained 16; protected-path and whitespace checks were clean.
+Deviations: Playwright required host-context execution after the sandboxed `tsx` IPC socket failed with `EPERM`. The deterministic placeholder remains intentionally server-to-browser only and is not rendered; Slice 02 must remove it before the GPT-backed feature is complete.
+Follow-ups: None. `FUP-001` through `FUP-005` remain deferred.
 
 ## Context And Selected Slice
 

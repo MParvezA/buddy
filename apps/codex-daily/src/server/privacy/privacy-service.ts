@@ -18,6 +18,7 @@ import { assertLocalDate } from "../planning/local-date.js";
 import { reportDayBounds } from "../reports/report-time.js";
 import { ReportRepository } from "../reports/report-repository.js";
 import { WriteCoordinator } from "../runtime/write-coordinator.js";
+import { SessionBriefRepository } from "../briefs/session-brief-repository.js";
 
 const REDISCOVERY_NOTICE =
   "Only Codex Daily local monitor data changed. Resuming monitoring can rediscover current Codex thread metadata; Codex history is untouched.";
@@ -40,6 +41,7 @@ export class PrivacyService {
   private readonly clock: () => Date;
   private readonly pauseWriters: () => Promise<void>;
   private readonly resumeWriters: () => Promise<void>;
+  private readonly briefs: SessionBriefRepository;
 
   constructor(options: PrivacyServiceOptions) {
     this.db = options.database;
@@ -48,6 +50,7 @@ export class PrivacyService {
     this.clock = options.clock ?? (() => new Date());
     this.pauseWriters = options.pauseWriters;
     this.resumeWriters = options.resumeWriters;
+    this.briefs = new SessionBriefRepository(this.db);
   }
 
   retainedCounts(): RetainedCategoryCount[] {
@@ -64,6 +67,8 @@ export class PrivacyService {
       ["suggestions", "report_completion_suggestions"],
       ["observerExclusions", "observer_thread_exclusions"],
       ["reportingRoles", "reporting_thread_roles"],
+      ["sessionBriefs", "session_briefs"],
+      ["sessionBriefJobs", "session_brief_jobs"],
       ["preferences", "report_schedule_preferences"],
     ];
     return definitions.map(([category, table]) => ({
@@ -209,7 +214,7 @@ export class PrivacyService {
       .all() as unknown as CodexDailyExport["reportingRoles"];
     return {
       product: "codex-daily",
-      schemaVersion: 1,
+      schemaVersion: 2,
       exportedAt: this.clock().toISOString(),
       schedule: this.reports.getSchedule(),
       days,
@@ -222,6 +227,8 @@ export class PrivacyService {
       reports: [...this.reports.listSnapshots()].reverse(),
       observerExclusions,
       reportingRoles,
+      sessionBriefs: this.briefs.listBriefRowsForExport(),
+      sessionBriefJobs: this.briefs.listJobsForExport(),
     };
   }
 
@@ -298,6 +305,42 @@ export class PrivacyService {
           WHERE occurred_at >= ? AND occurred_at < ?
         `)
         .run(bounds.start, bounds.end);
+      this.db
+        .prepare(`
+          DELETE FROM session_brief_jobs
+          WHERE (target_updated_at >= ? AND target_updated_at < ?)
+             OR (queued_at >= ? AND queued_at < ?)
+             OR (started_at >= ? AND started_at < ?)
+             OR (failure_at >= ? AND failure_at < ?)
+             OR (updated_at >= ? AND updated_at < ?)
+        `)
+        .run(
+          bounds.start,
+          bounds.end,
+          bounds.start,
+          bounds.end,
+          bounds.start,
+          bounds.end,
+          bounds.start,
+          bounds.end,
+          bounds.start,
+          bounds.end,
+        );
+      this.db
+        .prepare(`
+          DELETE FROM session_briefs
+          WHERE (source_updated_at >= ? AND source_updated_at < ?)
+             OR (generated_at >= ? AND generated_at < ?)
+             OR (updated_at >= ? AND updated_at < ?)
+        `)
+        .run(
+          bounds.start,
+          bounds.end,
+          bounds.start,
+          bounds.end,
+          bounds.start,
+          bounds.end,
+        );
       this.db.exec(`
         UPDATE observed_threads
         SET last_activity_at = (
@@ -325,6 +368,8 @@ export class PrivacyService {
       this.db.exec(`
         DELETE FROM report_snapshots;
         DELETE FROM reporting_thread_roles;
+        DELETE FROM session_brief_jobs;
+        DELETE FROM session_briefs;
         DELETE FROM attention_items;
         DELETE FROM task_thread_links;
         DELETE FROM observed_activities;

@@ -28,6 +28,13 @@ import { WriteCoordinator, LocalDataBusyError } from "./runtime/write-coordinato
 import { PrivacyService } from "./privacy/privacy-service.js";
 import { registerPrivacyRoutes } from "./privacy/privacy-routes.js";
 import { DiagnosticsService } from "./diagnostics/diagnostics-service.js";
+import { SessionBriefRepository } from "./briefs/session-brief-repository.js";
+import {
+  PlaceholderBriefAnalyzer,
+  type SessionBriefAnalyzer,
+} from "./briefs/placeholder-brief-analyzer.js";
+import { SessionBriefService } from "./briefs/session-brief-service.js";
+import { registerSessionBriefRoutes } from "./briefs/session-brief-routes.js";
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -52,6 +59,8 @@ export interface BuildAppOptions {
   reportSetTimer?: typeof setTimeout;
   reportClearTimer?: typeof clearTimeout;
   version?: string;
+  sessionBriefAnalyzer?: SessionBriefAnalyzer;
+  sessionBriefRetentionIntervalMs?: number;
 }
 
 function loopbackRequestAllowed(hostHeader: string | undefined, originHeader: string | undefined) {
@@ -115,6 +124,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     reconnectBaseMs: options.observerReconnectBaseMs,
     reconnectMaxMs: options.observerReconnectMaxMs,
   });
+  const sessionBriefs = new SessionBriefService({
+    repository: new SessionBriefRepository(database.connection),
+    observer,
+    analyzer: options.sessionBriefAnalyzer ?? new PlaceholderBriefAnalyzer(),
+    clock: options.clock,
+    retentionIntervalMs: options.sessionBriefRetentionIntervalMs,
+  });
   const attention = new AttentionService({
     repository: new AttentionRepository(database.connection),
     observer,
@@ -146,6 +162,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const observerEnabled = options.observer ?? process.env.NODE_ENV !== "test";
   const coordinator = new WriteCoordinator();
   const pauseWriters = async () => {
+    await sessionBriefs.pauseAndDrain();
     await reportScheduler.stopAndDrain();
     attention.stop();
     await observer.stop();
@@ -154,6 +171,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     attention.start();
     reportScheduler.resume();
     if (observerEnabled) void observer.start();
+    sessionBriefs.resume();
   };
   const privacy = new PrivacyService({
     database: database.connection,
@@ -209,6 +227,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook("onResponse", async (request) => releaseWrite(request));
   app.addHook("onError", async (request) => releaseWrite(request));
   app.addHook("onClose", async () => {
+    await sessionBriefs.stop();
     await reportScheduler.stopAndDrain();
     attention.stop();
     await observer.stop();
@@ -228,10 +247,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   await registerPlanningRoutes(app, planning);
   await registerObserverRoutes(app, observer);
+  await registerSessionBriefRoutes(app, sessionBriefs);
   await registerAttentionRoutes(app, attention);
   await registerReportRoutes(app, reports, reportScheduler);
   await registerPrivacyRoutes(app, privacy, diagnostics);
   attention.start();
+  sessionBriefs.start();
   await reportScheduler.start();
   if (observerEnabled) {
     void observer.start();

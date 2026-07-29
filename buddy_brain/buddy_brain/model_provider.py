@@ -322,6 +322,7 @@ class LlamaCppProvider:
         self._request_lock = threading.Lock()
         self._process_lock = threading.Lock()
         self._current_process: subprocess.Popen[bytes] | None = None
+        self._current_process_group_id: int | None = None
         self._current_output_file: Path | None = None
         self._shutting_down = False
         self._last_error = ""
@@ -340,9 +341,10 @@ class LlamaCppProvider:
         with self._process_lock:
             self._shutting_down = True
             process = self._current_process
+            process_group_id = self._current_process_group_id
             output_file = self._current_output_file
         if process is not None:
-            self._terminate_owned_process(process)
+            self._terminate_owned_process(process, process_group_id)
         if output_file is not None:
             output_file.unlink(missing_ok=True)
 
@@ -411,6 +413,7 @@ class LlamaCppProvider:
     def _run_completion(self, prompt: str) -> str:
         output_file = self._create_output_file()
         process: subprocess.Popen[bytes] | None = None
+        process_group_id: int | None = None
         try:
             with self._process_lock:
                 if self._shutting_down:
@@ -423,9 +426,14 @@ class LlamaCppProvider:
                     env=_CHILD_ENVIRONMENT,
                     start_new_session=True,
                 )
+                # start_new_session makes this direct child the leader of an owned
+                # session and process group. Capture it before the leader can exit;
+                # later lookups by PID could resolve an unrelated reused PID.
+                process_group_id = process.pid
                 self._current_process = process
+                self._current_process_group_id = process_group_id
                 self._current_output_file = output_file
-            stdout, stderr = self._read_bounded_output(process)
+            stdout, stderr = self._read_bounded_output(process, process_group_id)
             del stdout, stderr
             if process.returncode != 0:
                 raise ModelProviderError(f"llama.cpp exited with code {process.returncode}")
@@ -435,9 +443,11 @@ class LlamaCppProvider:
                 with self._process_lock:
                     if self._current_process is process:
                         self._current_process = None
+                    if self._current_process_group_id == process_group_id:
+                        self._current_process_group_id = None
                     if self._current_output_file == output_file:
                         self._current_output_file = None
-                self._terminate_owned_process(process)
+                self._terminate_owned_process(process, process_group_id)
                 for stream in (process.stdout, process.stderr):
                     if stream is not None:
                         stream.close()
@@ -470,7 +480,9 @@ class LlamaCppProvider:
         except UnicodeDecodeError as error:
             raise ModelProviderError("llama.cpp output file was not UTF-8") from error
 
-    def _read_bounded_output(self, process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    def _read_bounded_output(
+        self, process: subprocess.Popen[bytes], process_group_id: int
+    ) -> tuple[bytes, bytes]:
         assert process.stdout is not None
         assert process.stderr is not None
         stdout = bytearray()
@@ -487,7 +499,7 @@ class LlamaCppProvider:
             while streams:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    self._terminate_owned_process(process)
+                    self._terminate_owned_process(process, process_group_id)
                     raise ModelProviderTimeout("llama.cpp completion timed out")
                 events = selector.select(remaining)
                 if not events:
@@ -506,7 +518,7 @@ class LlamaCppProvider:
                     stream, captured, limit = streams[fd]
                     del stream
                     if len(captured) + len(chunk) > limit:
-                        self._terminate_owned_process(process)
+                        self._terminate_owned_process(process, process_group_id)
                         raise ModelProviderError(
                             "llama.cpp output exceeded its bounded capture limit"
                         )
@@ -514,7 +526,7 @@ class LlamaCppProvider:
             process.wait(timeout=0.2)
             return bytes(stdout), bytes(stderr)
         except subprocess.TimeoutExpired:
-            self._terminate_owned_process(process)
+            self._terminate_owned_process(process, process_group_id)
             raise ModelProviderTimeout(
                 "llama.cpp completion did not exit after output closed"
             ) from None
@@ -522,17 +534,18 @@ class LlamaCppProvider:
             selector.close()
 
     @staticmethod
-    def _terminate_owned_process(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
+    def _terminate_owned_process(
+        process: subprocess.Popen[bytes], process_group_id: int | None
+    ) -> None:
+        if process_group_id is None:
             return
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process_group_id, signal.SIGTERM)
             process.wait(timeout=0.2)
-            return
         except (OSError, subprocess.TimeoutExpired):
             pass
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process_group_id, signal.SIGKILL)
         except OSError:
             pass
         try:

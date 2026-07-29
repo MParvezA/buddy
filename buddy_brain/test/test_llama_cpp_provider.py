@@ -2,6 +2,7 @@
 
 """Pure tests for the bounded direct llama.cpp child-process adapter."""
 
+import os
 from pathlib import Path
 import stat
 import tempfile
@@ -42,6 +43,16 @@ def _config(runtime_binary: Path, model_file: Path, **overrides: object) -> Llam
     }
     values.update(overrides)
     return LlamaCppConfig.from_values(**values)
+
+
+def _wait_for_process_exit(process_id: int) -> None:
+    for _ in range(200):
+        try:
+            os.kill(process_id, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"descendant process {process_id} was still alive")
 
 
 def test_llama_cpp_config_requires_explicit_resources_and_profile_bounds():
@@ -251,6 +262,58 @@ def test_llama_cpp_shutdown_terminates_an_owned_child_process():
         assert errors
         assert provider._current_process is None
         assert not Path(record.read_text()).exists()
+
+
+def test_llama_cpp_terminates_descendant_group_after_leader_exit():
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        for terminal_path in ("timeout", "shutdown"):
+            case = directory / terminal_path
+            case.mkdir()
+            record = case / "descendant-and-output"
+            binary, model = _runtime(
+                case,
+                "import signal\n"
+                "import subprocess\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "output = Path(sys.argv[sys.argv.index('--output-file') + 1])\n"
+                "descendant = subprocess.Popen([\n"
+                "    sys.executable, '-c',\n"
+                "    'import signal, time; signal.signal(signal.SIGTERM, "
+                "signal.SIG_IGN); time.sleep(30)',\n"
+                "])\n"
+                f"Path({str(record)!r}).write_text(str(descendant.pid) + '\\n' + str(output))\n",
+            )
+            provider = LlamaCppProvider(_config(binary, model))
+            errors = []
+
+            def complete() -> None:
+                try:
+                    provider.complete('{"utterance":"hello"}')
+                except ModelProviderError as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=complete)
+            worker.start()
+            for _ in range(100):
+                process = provider._current_process
+                if record.exists() and process is not None and process.poll() is not None:
+                    break
+                time.sleep(0.01)
+            assert record.exists()
+            assert provider._current_process is not None
+            assert provider._current_process.poll() is not None
+
+            if terminal_path == "shutdown":
+                provider.shutdown()
+            worker.join(timeout=3.0)
+            assert not worker.is_alive()
+            assert errors
+            descendant, output_file = record.read_text().splitlines()
+            _wait_for_process_exit(int(descendant))
+            assert not Path(output_file).exists()
+            provider.shutdown()
 
 
 def test_llama_cpp_output_file_is_removed_after_every_terminal_path():

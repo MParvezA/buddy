@@ -8,6 +8,7 @@ from threading import Event, Thread
 import time
 
 from buddy_voice.local_providers import (
+    _is_no_speech_sentinel,
     LocalProviderError,
     OptionalWakeWordProvider,
     PiperTextToSpeechProvider,
@@ -192,6 +193,24 @@ def test_whisper_invalid_output_is_structured_and_discards_recording(tmp_path: P
     with pytest.raises(SttError, match='invalid JSON'):
         provider.transcribe(AudioCapture(b'', 0, 'en-US', audio))
     assert not audio.exists()
+
+
+def test_whisper_blank_audio_sentinel_fails_closed_and_discards_files(tmp_path: Path) -> None:
+    """An exact normalized [BLANK_AUDIO] result is not a usable utterance."""
+    whisper = _script(tmp_path / 'whisper-cli', """
+import json, pathlib, sys
+base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
+base.with_suffix('.json').write_text(json.dumps({'text': ' [BLANK_AUDIO] '}))
+""")
+    model = _asset(tmp_path / 'ggml-base.bin')
+    audio = _asset(tmp_path / 'input.wav')
+    from buddy_voice.providers import AudioCapture
+    provider = WhisperCppSpeechToTextProvider(binary=whisper, model=model)
+    with pytest.raises(SttError, match='no usable utterance'):
+        provider.transcribe(AudioCapture(b'', 0, 'en-US', audio))
+    assert not audio.exists()
+    assert not (tmp_path / 'input.json').exists()
+    assert not _is_no_speech_sentinel('[a legitimate bracketed utterance]')
 
 
 def test_whisper_timeout_terminates_child_and_discards_recording(tmp_path: Path) -> None:

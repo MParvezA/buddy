@@ -15,6 +15,7 @@ from buddy_voice.local_providers import (
     _start,
     _terminate,
     LocalProviderError,
+    MAX_SPEECH_INPUT_UTF8_BYTES,
     OptionalWakeWordProvider,
     PiperTextToSpeechProvider,
     PiperVoice,
@@ -31,6 +32,7 @@ from buddy_voice.local_providers import (
 )
 from buddy_voice.providers import (
     SpeechSynthesisCancelled,
+    SpeechSynthesisError,
     SpeechSynthesisTimeout,
     SynthesizedSpeech,
 )
@@ -185,6 +187,32 @@ open(sys.argv[-1], 'wb').truncate(2 * 1024 * 1024)
     assert not list(tmp_path.glob('buddy-capture-*'))
 
 
+def test_capture_settles_descendant_before_validating_mutable_output(tmp_path: Path) -> None:
+    """A pw-record launcher exit cannot leave a child mutating a trusted capture."""
+    recorder = _script(tmp_path / 'pw-record', """
+import pathlib, signal, subprocess, sys, time, wave
+output = pathlib.Path(sys.argv[-1])
+marker = output.parent.parent / 'capture-descendant'
+with wave.open(str(output), 'wb') as wav:
+    wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+    wav.writeframes(b'\\0\\0' * 16)
+child = (
+    'import pathlib, signal, sys, time; output = pathlib.Path(sys.argv[1]); marker = pathlib.Path(sys.argv[2]); '
+    'output.write_bytes(b"mutable"); marker.with_suffix(".ready").write_text("ready"); '
+    'signal.signal(signal.SIGINT, lambda *_: (marker.write_text("stopped"), sys.exit(0))); time.sleep(10)'
+)
+subprocess.Popen([sys.executable, '-c', child, str(output), str(marker)], close_fds=False)
+deadline = time.monotonic() + 1
+while not marker.with_suffix('.ready').exists() and time.monotonic() < deadline: time.sleep(.01)
+""")
+    source = PipeWirePushToTalkAudioInput(
+        record_binary=recorder, maximum_capture_seconds=1, temp_directory=tmp_path)
+    with pytest.raises(Exception, match='readable WAV'):
+        source.capture_once(Event())
+    assert (tmp_path / 'capture-descendant').read_text() == 'stopped'
+    assert not list(tmp_path.glob('buddy-capture-*'))
+
+
 def test_whisper_parses_json_and_discards_recording(tmp_path: Path) -> None:
     """whisper-cli receives an argv model/input/thread/language configuration."""
     whisper = _script(tmp_path / 'whisper-cli', """
@@ -287,6 +315,36 @@ base.with_suffix('.json').write_bytes(b'x' * (2 * 1024 * 1024))
         WhisperCppSpeechToTextProvider(binary=whisper, model=model).transcribe(
             AudioCapture(b'', 0, 'en-US', audio))
     assert not audio.exists()
+
+
+def test_whisper_settles_descendant_before_trusting_mutable_json(tmp_path: Path) -> None:
+    """A successful whisper launcher cannot leave a child changing its transcript."""
+    marker = tmp_path / 'whisper-descendant'
+    existing_output_directories = set(Path('/tmp').glob('buddy-whisper-*'))
+    whisper = _script(tmp_path / 'whisper-cli', """
+import json, pathlib, signal, subprocess, sys, time
+base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
+output = base.with_suffix('.json')
+output.write_text(json.dumps({'text': 'safe'}))
+marker = pathlib.Path(sys.argv[sys.argv.index('-m') + 1]).parent / 'whisper-descendant'
+child = (
+    'import pathlib, signal, sys, time; output = pathlib.Path(sys.argv[1]); marker = pathlib.Path(sys.argv[2]); '
+    'output.write_bytes(b"mutable"); marker.with_suffix(".ready").write_text("ready"); '
+    'signal.signal(signal.SIGTERM, lambda *_: (marker.write_text("stopped"), sys.exit(0))); time.sleep(10)'
+)
+subprocess.Popen([sys.executable, '-c', child, str(output), str(marker)], close_fds=False)
+deadline = time.monotonic() + 1
+while not marker.with_suffix('.ready').exists() and time.monotonic() < deadline: time.sleep(.01)
+""")
+    model = _asset(tmp_path / 'ggml-base.bin')
+    audio = _asset(tmp_path / 'input.wav')
+    from buddy_voice.providers import AudioCapture
+    with pytest.raises(SttError, match='invalid JSON'):
+        WhisperCppSpeechToTextProvider(binary=whisper, model=model).transcribe(
+            AudioCapture(b'', 0, 'en-US', audio))
+    assert marker.read_text() == 'stopped'
+    assert not audio.exists()
+    assert set(Path('/tmp').glob('buddy-whisper-*')) == existing_output_directories
 
 
 def test_whisper_invalid_output_is_structured_and_discards_recording(tmp_path: Path) -> None:
@@ -427,6 +485,89 @@ else:
     assert not list(tmp_path.glob('buddy-piper-*'))
 
 
+def test_piper_settles_descendant_before_trusting_mutable_wav(tmp_path: Path) -> None:
+    """A Piper launcher exit cannot leave a child changing the output WAV."""
+    marker = tmp_path / 'piper-descendant'
+    piper = _script(tmp_path / 'piper', """
+import pathlib, signal, subprocess, sys, time, wave
+sys.stdin.read()
+output = pathlib.Path(sys.argv[sys.argv.index('--output_file') + 1])
+with wave.open(str(output), 'wb') as wav:
+    wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+    wav.writeframes(b'\\0\\0' * 16)
+marker = pathlib.Path(sys.argv[sys.argv.index('--model') + 1]).parent / 'piper-descendant'
+child = (
+    'import pathlib, signal, sys, time; output = pathlib.Path(sys.argv[1]); marker = pathlib.Path(sys.argv[2]); '
+    'output.write_bytes(b"mutable"); marker.with_suffix(".ready").write_text("ready"); '
+    'signal.signal(signal.SIGTERM, lambda *_: (marker.write_text("stopped"), sys.exit(0))); time.sleep(10)'
+)
+subprocess.Popen([sys.executable, '-c', child, str(output), str(marker)], close_fds=False)
+deadline = time.monotonic() + 1
+while not marker.with_suffix('.ready').exists() and time.monotonic() < deadline: time.sleep(.01)
+""")
+    player = _script(tmp_path / 'pw-play', 'import sys\nsys.exit(0)\n')
+    en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
+    de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
+    provider = PiperTextToSpeechProvider(
+        piper_binary=piper, playback_binary=player,
+        english_voice=PiperVoice('en_test', 'en-US', en_model, en_config),
+        german_voice=PiperVoice('de_test', 'de-DE', de_model, de_config), temp_directory=tmp_path)
+    with pytest.raises(SpeechSynthesisError, match='Piper output'):
+        provider.synthesize('hello', '', cancel_event=Event(), deadline_monotonic=time.monotonic() + 1.0)
+    assert marker.read_text() == 'stopped'
+    assert not list(tmp_path.glob('buddy-piper-*'))
+
+
+def test_piper_rejects_oversized_multibyte_text_before_starting_child(tmp_path: Path) -> None:
+    """Speak input is limited by UTF-8 bytes before a process or temp WAV exists."""
+    marker = tmp_path / 'piper-started'
+    piper = _script(tmp_path / 'piper', """
+import pathlib, sys
+pathlib.Path(sys.argv[sys.argv.index('--model') + 1]).parent.joinpath('piper-started').write_text('started')
+""")
+    player = _script(tmp_path / 'pw-play', 'import sys\nsys.exit(0)\n')
+    en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
+    de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
+    provider = PiperTextToSpeechProvider(
+        piper_binary=piper, playback_binary=player,
+        english_voice=PiperVoice('en_test', 'en-US', en_model, en_config),
+        german_voice=PiperVoice('de_test', 'de-DE', de_model, de_config), temp_directory=tmp_path)
+    text = '€' * (MAX_SPEECH_INPUT_UTF8_BYTES // 2)
+    assert len(text.encode('utf-8')) > MAX_SPEECH_INPUT_UTF8_BYTES
+    with pytest.raises(SpeechSynthesisError, match='exceeds'):
+        provider.synthesize(text, '', cancel_event=Event(), deadline_monotonic=time.monotonic() + 1.0)
+    assert not marker.exists()
+    assert not list(tmp_path.glob('buddy-piper-*'))
+
+
+def test_piper_playback_settles_descendant_after_launcher_success(tmp_path: Path) -> None:
+    """Playback succeeds only after its owned descendant is stopped as well."""
+    marker = tmp_path / 'playback-descendant'
+    piper = _script(tmp_path / 'piper', 'import sys\nsys.exit(0)\n')
+    player = _script(tmp_path / 'pw-play', """
+import pathlib, signal, subprocess, sys, time
+marker = pathlib.Path(sys.argv[-1]).parent / 'playback-descendant'
+child = (
+    'import pathlib, signal, sys, time; marker = pathlib.Path(sys.argv[1]); '
+    'marker.with_suffix(".ready").write_text("ready"); '
+    'signal.signal(signal.SIGTERM, lambda *_: (marker.write_text("stopped"), sys.exit(0))); time.sleep(10)'
+)
+subprocess.Popen([sys.executable, '-c', child, str(marker)], close_fds=False)
+deadline = time.monotonic() + 1
+while not marker.with_suffix('.ready').exists() and time.monotonic() < deadline: time.sleep(.01)
+""")
+    en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
+    de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
+    audio = _asset(tmp_path / 'speech.wav')
+    provider = PiperTextToSpeechProvider(
+        piper_binary=piper, playback_binary=player,
+        english_voice=PiperVoice('en_test', 'en-US', en_model, en_config),
+        german_voice=PiperVoice('de_test', 'de-DE', de_model, de_config), temp_directory=tmp_path)
+    provider.play(
+        SynthesizedSpeech(0.01, audio), cancel_event=Event(), deadline_monotonic=time.monotonic() + 1.0)
+    assert marker.read_text() == 'stopped'
+
+
 def test_native_child_environment_is_allowlisted(monkeypatch, tmp_path: Path) -> None:
     """Child processes receive required PipeWire variables, never arbitrary parent secrets."""
     output = tmp_path / 'environment.json'
@@ -483,12 +624,12 @@ subprocess.Popen([sys.executable, '-c', child, marker])
     ('cancel_after_seconds', 'deadline_offset_seconds', 'expected_error'),
     ((0.05, 1.0, SpeechSynthesisCancelled), (None, 0.05, SpeechSynthesisTimeout)),
 )
-def test_piper_nonreading_stdin_is_cancellable_and_cleans_temp_audio(
+def test_piper_nonreading_maximum_stdin_is_cancellable_and_cleans_temp_audio(
         tmp_path: Path,
         cancel_after_seconds: float | None,
         deadline_offset_seconds: float,
         expected_error: type[Exception]) -> None:
-    """Oversized valid text cannot block Piper cancellation, timeout, or cleanup."""
+    """Maximum valid text cannot block Piper cancellation, timeout, or cleanup."""
     piper = _script(tmp_path / 'piper', """
 import pathlib, signal, sys, time
 output = sys.argv[sys.argv.index('--output_file') + 1]
@@ -514,7 +655,7 @@ while True: time.sleep(0.01)
     started = time.monotonic()
     with pytest.raises(expected_error):
         provider.synthesize(
-            'x' * (2 * 1024 * 1024),
+            'x' * MAX_SPEECH_INPUT_UTF8_BYTES,
             '',
             cancel_event=cancelled,
             deadline_monotonic=time.monotonic() + deadline_offset_seconds,

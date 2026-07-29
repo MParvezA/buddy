@@ -295,3 +295,29 @@ Verification:
 - Protected-path and whitespace checks: clean.
 
 Next action: commit this narrow correction and repeat `5_Review`.
+
+## Final Review
+
+Status: review-passed
+Reviewed commit: `6a0f0dbcaf2e29c40e963d00e27bf7542c117f5f`
+Decision: proceed to `6_Cleanup`.
+
+No must-fix, should-fix, or follow-up regression remains. RR1 and RR2 are
+corrected: offline thread detail returns retained metadata and normalized facts
+with an explicit unavailable transient-history state, and the complete retained
+per-thread timeline includes attention sources beyond 1,000 events. Connected
+full history remains request-scoped and `no-store`, and transcript bodies remain
+absent from persistence and observer snapshot/SSE DTOs.
+
+Final verification:
+
+- `npm run check`: passed; lint, typecheck, 31 files/99 tests, and production
+  build.
+- `npm run test:e2e`: passed; 16 browser flows and 6 intentional duplicate
+  mobile mutation skips.
+- Focused RR1/RR2 review: 5 files/24 tests passed.
+- Repository contracts: 4 passed; ROS package inventory unchanged at 16.
+- `git diff --check d3f0185^..6a0f0db`: passed.
+- Protected `buddy_*` and `docs/contracts` range: empty.
+
+The accepted deviations above remain unchanged and do not block cleanup.

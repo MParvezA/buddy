@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 01: Daily Dashboard` (this status-bearing commit)
+Verification: `npm run check` passed; Playwright passed 4/4 at desktop and mobile widths; loopback API/SPA smoke passed; ROS package inventory and protected-path diff were unchanged.
+Deviations: Browser verification required loopback/browser permissions. `npm audit --omit=dev` reported one high React Router advisory affecting server actions/RSC; this browser-only app uses neither surface and no fixed current release was available. `@fastify/static` was updated to patched 10.1.2.
+Follow-ups: None. FUP-001 through FUP-006 remain deferred.
 
 ## Context
 

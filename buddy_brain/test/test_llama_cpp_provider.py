@@ -87,7 +87,7 @@ def test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object():
             "assert '--log-disable' in sys.argv\n"
             "assert '--no-show-timings' in sys.argv\n"
             "assert '--no-conversation' in sys.argv\n"
-            "assert '--single-turn' in sys.argv\n"
+            "assert '--single-turn' not in sys.argv\n"
             "assert '--no-jinja' in sys.argv\n"
             "assert '--no-display-prompt' in sys.argv\n"
             'print(\'llama.cpp: framing {"kind":"clarification",'
@@ -123,7 +123,6 @@ def test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object():
             "--log-disable",
             "--no-show-timings",
             "--no-conversation",
-            "--single-turn",
             "--no-jinja",
             "--no-warmup",
             "--no-display-prompt",

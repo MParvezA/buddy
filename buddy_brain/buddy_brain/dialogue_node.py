@@ -35,10 +35,51 @@ from buddy_brain.dialogue_core import (
     DialogueEffect,
     ValidatedPlan,
 )
-from buddy_brain.model_provider import DeterministicFakeProvider
+from buddy_brain.model_provider import (
+    DeterministicFakeProvider,
+    LlamaCppConfig,
+    LlamaCppProvider,
+    LocalModelProvider,
+    UnavailableLocalModelProvider,
+)
 
 
 READINESS_CHECK_PERIOD_SECONDS = 0.25
+
+
+def _configured_model_provider(values: dict[str, object]) -> LocalModelProvider:
+    """Select only the explicit local provider, failing closed on invalid resources."""
+    selection = values["model_provider"]
+    if selection == "fake":
+        response = values["fake_model_response"]
+        responses = [response] if isinstance(response, str) and response else None
+        return DeterministicFakeProvider(responses)
+    if selection != "llama_cpp":
+        return UnavailableLocalModelProvider(
+            "invalid_provider_selection", "model_provider must be fake or llama_cpp"
+        )
+    try:
+        config = LlamaCppConfig.from_values(
+            binary=values["llama_cpp_binary"],
+            model=values["llama_cpp_model"],
+            threads=values["llama_cpp_threads"],
+            context_tokens=values["llama_cpp_context_tokens"],
+            output_tokens=values["llama_cpp_output_tokens"],
+            timeout_seconds=values["llama_cpp_timeout_seconds"],
+            temperature=values["llama_cpp_temperature"],
+        )
+    except ValueError as error:
+        return UnavailableLocalModelProvider(
+            "llama_cpp", f"llama.cpp configuration invalid: {error}"
+        )
+    return LlamaCppProvider(config)
+
+
+def _voice_for_locale(locale: object, english_voice: str, german_voice: str) -> str:
+    """Choose German only for a final German transcript; English is the safe default."""
+    if isinstance(locale, str) and locale.casefold().startswith("de"):
+        return german_voice
+    return english_voice
 
 
 def _uuid_message(value: uuid.UUID) -> Any:
@@ -101,14 +142,40 @@ def _capability_schema(descriptor: Any) -> CapabilitySchema:
 class DialogueNode(Node):
     """Consumes bounded summaries and controls only the frozen task/speech actions."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_provider: LocalModelProvider | None = None) -> None:
         super().__init__("dialogue", namespace="/buddy")
         if not self.has_parameter("use_sim_time"):
             self.declare_parameter("use_sim_time", False)
         self.declare_parameter("fake_model_response", "")
-        response = self.get_parameter("fake_model_response").value
-        responses = [response] if isinstance(response, str) and response else None
-        self._core = DialogueCore(DeterministicFakeProvider(responses))
+        self.declare_parameter("model_provider", "fake")
+        self.declare_parameter("llama_cpp_binary", "")
+        self.declare_parameter("llama_cpp_model", "")
+        self.declare_parameter("llama_cpp_threads", 3)
+        self.declare_parameter("llama_cpp_context_tokens", 4096)
+        self.declare_parameter("llama_cpp_output_tokens", 256)
+        self.declare_parameter("llama_cpp_timeout_seconds", 20.0)
+        self.declare_parameter("llama_cpp_temperature", 0.1)
+        self.declare_parameter("english_voice", "en")
+        self.declare_parameter("german_voice", "de")
+        parameter_values = {
+            name: self.get_parameter(name).value
+            for name in (
+                "fake_model_response",
+                "model_provider",
+                "llama_cpp_binary",
+                "llama_cpp_model",
+                "llama_cpp_threads",
+                "llama_cpp_context_tokens",
+                "llama_cpp_output_tokens",
+                "llama_cpp_timeout_seconds",
+                "llama_cpp_temperature",
+            )
+        }
+        self._model_provider = model_provider or _configured_model_provider(parameter_values)
+        self._english_voice = self._validated_voice_parameter("english_voice")
+        self._german_voice = self._validated_voice_parameter("german_voice")
+        self._selected_voice = self._english_voice
+        self._core = DialogueCore(self._model_provider)
 
         summary_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -161,7 +228,16 @@ class DialogueNode(Node):
 
     def _on_utterance(self, message: RecognizedUtterance) -> None:
         if message.is_final:
+            self._selected_voice = _voice_for_locale(
+                message.locale, self._english_voice, self._german_voice
+            )
             self._dispatch(self._core.receive_final_utterance(message.text))
+
+    def _validated_voice_parameter(self, name: str) -> str:
+        value = self.get_parameter(name).value
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty configured voice name")
+        return value.strip()
 
     def _refresh_capabilities(self) -> None:
         if self._capabilities_in_flight:
@@ -200,7 +276,9 @@ class DialogueNode(Node):
 
     def _dispatch(self, effects: list[DialogueEffect]) -> None:
         for effect in effects:
-            if effect.kind == "speak":
+            if effect.kind == "provider_failure":
+                self._report_provider_failure(effect.provider_error)
+            elif effect.kind == "speak":
                 self._request_speech(effect.text)
             elif effect.kind == "execute" and effect.plan is not None:
                 self._execute(effect.plan)
@@ -217,7 +295,7 @@ class DialogueNode(Node):
             goal = Speak.Goal()
             goal.request_id = _uuid_message(uuid.uuid4())
             goal.text = text
-            goal.voice = ""
+            goal.voice = self._selected_voice
             goal.priority = 0
             goal.interrupt_current = False
             submission = self._speak_client.send_goal_async(goal)
@@ -581,10 +659,33 @@ class DialogueNode(Node):
         diagnostics.status = [diagnostic]
         self._diagnostics_publisher.publish(diagnostics)
 
+    def _report_provider_failure(self, detail: str) -> None:
+        """Publish a provider-boundary error without creating a task or retry loop."""
+        self.get_logger().warning(detail)
+        diagnostics = DiagnosticArray()
+        diagnostics.header.stamp = self.get_clock().now().to_msg()
+        diagnostic = DiagnosticStatus()
+        diagnostic.name = "buddy_dialogue/model_provider"
+        diagnostic.hardware_id = "buddy_brain"
+        diagnostic.level = DiagnosticStatus.ERROR
+        diagnostic.message = "local model response was rejected; asking the user to rephrase"
+        diagnostic.values = [
+            KeyValue(key="provider", value=self._model_provider.health().identity),
+            KeyValue(key="detail", value=detail),
+        ]
+        diagnostics.status = [diagnostic]
+        self._diagnostics_publisher.publish(diagnostics)
+
     def _publish_diagnostics(self) -> None:
         task_executor_ready = self._execute_client.server_is_ready()
         speech_ready = self._speak_client.server_is_ready()
-        ready = self._capabilities_ready and task_executor_ready and speech_ready
+        provider_health = self._model_provider.health()
+        ready = (
+            self._capabilities_ready
+            and task_executor_ready
+            and speech_ready
+            and provider_health.ready
+        )
         diagnostics = DiagnosticArray()
         diagnostics.header.stamp = self.get_clock().now().to_msg()
         status = DiagnosticStatus()
@@ -597,9 +698,18 @@ class DialogueNode(Node):
             KeyValue(key="capability_count", value=str(self._capability_count)),
             KeyValue(key="task_executor_ready", value=str(task_executor_ready).lower()),
             KeyValue(key="speech_ready", value=str(speech_ready).lower()),
+            KeyValue(key="model_provider", value=provider_health.identity),
+            KeyValue(key="model_provider_ready", value=str(provider_health.ready).lower()),
+            KeyValue(key="model_provider_error", value=provider_health.last_error),
+            KeyValue(key="model_provider_recovered", value=str(provider_health.recovered).lower()),
         ]
         diagnostics.status = [status]
         self._diagnostics_publisher.publish(diagnostics)
+
+    def destroy_node(self) -> bool:
+        """Terminate an owned inference child before ROS resources are released."""
+        self._model_provider.shutdown()
+        return super().destroy_node()
 
 
 def _goal_status_name(status: int) -> str:

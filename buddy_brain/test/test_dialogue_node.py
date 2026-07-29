@@ -12,7 +12,8 @@ import rclpy
 
 from action_msgs.msg import GoalStatus
 from buddy_brain.dialogue_core import DialogueEffect, ValidatedPlan
-from buddy_brain.dialogue_node import DialogueNode
+from buddy_brain.dialogue_node import DialogueNode, _configured_model_provider, _voice_for_locale
+from buddy_brain.model_provider import DeterministicFakeProvider, UnavailableLocalModelProvider
 from buddy_interfaces.action import ExecuteTask, Speak
 from buddy_interfaces.msg import CapabilityDescriptor
 
@@ -383,6 +384,10 @@ def test_dialogue_health_waits_for_capabilities_and_action_servers():
             "capability_count": "0",
             "task_executor_ready": "false",
             "speech_ready": "false",
+            "model_provider": "deterministic_fake",
+            "model_provider_ready": "true",
+            "model_provider_error": "",
+            "model_provider_recovered": "false",
         }
 
         descriptor = CapabilityDescriptor()
@@ -402,6 +407,10 @@ def test_dialogue_health_waits_for_capabilities_and_action_servers():
             "capability_count": "1",
             "task_executor_ready": "true",
             "speech_ready": "true",
+            "model_provider": "deterministic_fake",
+            "model_provider_ready": "true",
+            "model_provider_error": "",
+            "model_provider_recovered": "false",
         }
     finally:
         node._execute_client = original_execute_client
@@ -433,5 +442,84 @@ def test_capability_service_loss_revokes_cached_dialogue_authorization():
         assert node._core._capabilities == {}
     finally:
         node._capabilities_client = original_capabilities_client
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_final_utterance_locale_selects_german_or_english_speak_voice():
+    rclpy.init()
+    node = DialogueNode()
+    original_client = node._speak_client
+    try:
+        client = _SpeechClient()
+        node._speak_client = client
+        german = type("Utterance", (), {"is_final": True, "locale": "de-DE", "text": "hallo"})()
+        node._on_utterance(german)
+        assert client.goals[-1].voice == "de"
+
+        english = type("Utterance", (), {"is_final": True, "locale": "en-US", "text": "hello"})()
+        node._on_utterance(english)
+        assert client.goals[-1].voice == "en"
+        assert _voice_for_locale("unknown", "en", "de") == "en"
+    finally:
+        node._speak_client = original_client
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_provider_failure_publishes_diagnostic_and_never_dispatches_a_task():
+    rclpy.init()
+    provider = DeterministicFakeProvider(['{"kind":"plan","unexpected":true}'])
+    node = DialogueNode(provider)
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    node._request_speech = lambda text: None
+    try:
+        node._dispatch(node._core.receive_final_utterance("unsafe proposal"))
+        diagnostic = diagnostics.messages[-1].status[0]
+        assert diagnostic.name == "buddy_dialogue/model_provider"
+        assert diagnostic.level == diagnostic.ERROR
+        assert node._core._pending is None
+    finally:
+        node._diagnostics_publisher = publisher
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_missing_explicit_provider_is_unready_and_never_dispatches_a_task():
+    rclpy.init()
+    provider = _configured_model_provider(
+        {
+            "model_provider": "llama_cpp",
+            "fake_model_response": "",
+            "llama_cpp_binary": "",
+            "llama_cpp_model": "",
+            "llama_cpp_threads": 3,
+            "llama_cpp_context_tokens": 4096,
+            "llama_cpp_output_tokens": 256,
+            "llama_cpp_timeout_seconds": 20.0,
+            "llama_cpp_temperature": 0.1,
+        }
+    )
+    assert isinstance(provider, UnavailableLocalModelProvider)
+    node = DialogueNode(provider)
+    publisher = node._diagnostics_publisher
+    diagnostics = _DiagnosticSink()
+    node._diagnostics_publisher = diagnostics
+    node._request_speech = lambda text: None
+    executed = []
+    node._execute = executed.append
+    try:
+        node._publish_diagnostics()
+        values = {item.key: item.value for item in diagnostics.messages[-1].status[0].values}
+        assert values["model_provider"] == "llama_cpp"
+        assert values["model_provider_ready"] == "false"
+        assert "configuration invalid" in values["model_provider_error"]
+        node._dispatch(node._core.receive_final_utterance("go to the kitchen"))
+        assert executed == []
+        assert diagnostics.messages[-1].status[0].name == "buddy_dialogue/model_provider"
+    finally:
+        node._diagnostics_publisher = publisher
         node.destroy_node()
         rclpy.shutdown()

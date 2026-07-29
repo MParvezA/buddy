@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from buddy_brain.model_provider import LocalModelProvider
+from buddy_brain.model_provider import LocalModelProvider, ModelProviderError
 
 
 ARGUMENT_TYPES = {"string", "integer", "float", "boolean"}
@@ -86,6 +86,7 @@ class DialogueEffect:
     kind: str
     text: str = ""
     plan: ValidatedPlan | None = None
+    provider_error: str = ""
 
 
 class ContextBuilder:
@@ -264,12 +265,25 @@ class DialogueCore:
                 ContextBuilder.build(utterance, self._status, self._world, self._capabilities)
             )
             parsed = validate_model_response(response, self._capabilities, self._session_id)
-        except (ValidationError, RuntimeError, ValueError):
-            return [DialogueEffect("speak", "I could not safely form that task. Please rephrase it.")]
+        except ModelProviderError as error:
+            return self._safe_rephrase(f"model provider failure: {error}")
+        except ValidationError as error:
+            return self._safe_rephrase(f"model response rejected: {error}")
+        except (RuntimeError, ValueError) as error:
+            return self._safe_rephrase(f"model provider failure: {error}")
         if isinstance(parsed, str):
             return [DialogueEffect("speak", parsed)]
         self._pending = parsed
         return [DialogueEffect("speak", f"{parsed.summary}. Would you like me to proceed?")]
+
+    @staticmethod
+    def _safe_rephrase(detail: str) -> list[DialogueEffect]:
+        """Emit a diagnostic marker before the existing non-authoritative response."""
+        response = "I could not safely form that task. Please rephrase it."
+        return [
+            DialogueEffect("provider_failure", response, provider_error=detail),
+            DialogueEffect("speak", response),
+        ]
 
     def handle_execution_result(self, outcome: str, message: str) -> list[DialogueEffect]:
         """Convert an action result to an explicit, user-facing response."""

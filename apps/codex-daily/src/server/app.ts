@@ -4,6 +4,9 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { HealthResponse } from "../shared/dashboard.js";
 import type { ObserverMode } from "../shared/observer-types.js";
+import { registerAttentionRoutes } from "./attention/attention-routes.js";
+import { AttentionService } from "./attention/attention-service.js";
+import { AttentionRepository } from "./attention/attention-repository.js";
 import { registerObserverRoutes } from "./codex/observer-routes.js";
 import { ObserverService } from "./codex/observer-service.js";
 import type { ProcessFactory } from "./codex/app-server-client.js";
@@ -30,6 +33,7 @@ export interface BuildAppOptions {
   observerRequestTimeoutMs?: number;
   observerReconnectBaseMs?: number;
   observerReconnectMaxMs?: number;
+  attentionSweepIntervalMs?: number;
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -56,7 +60,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     reconnectBaseMs: options.observerReconnectBaseMs,
     reconnectMaxMs: options.observerReconnectMaxMs,
   });
+  const attention = new AttentionService({
+    repository: new AttentionRepository(database.connection),
+    observer,
+    clock: options.clock,
+    sweepIntervalMs: options.attentionSweepIntervalMs,
+  });
   app.addHook("onClose", async () => {
+    attention.stop();
     await observer.stop();
     database.close();
   });
@@ -75,6 +86,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.get("/api/day", async () => representativeDay);
   await registerPlanningRoutes(app, planning);
   await registerObserverRoutes(app, observer);
+  await registerAttentionRoutes(app, attention);
+  attention.start();
   if (options.observer ?? process.env.NODE_ENV !== "test") {
     void observer.start();
   }

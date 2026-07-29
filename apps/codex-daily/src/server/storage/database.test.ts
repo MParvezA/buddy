@@ -24,6 +24,7 @@ describe("planning database", () => {
     expect(applied).toEqual([
       { version: "001_morning_planning.sql" },
       { version: "002_codex_observer.sql" },
+      { version: "003_attention.sql" },
     ]);
     expect(() =>
       database.connection

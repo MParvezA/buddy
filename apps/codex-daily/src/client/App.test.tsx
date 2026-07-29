@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { representativeDay } from "../server/representative-day";
+import type { AttentionSnapshot } from "../shared/attention";
 import type { HealthResponse } from "../shared/dashboard";
 import type { ObserverSnapshot } from "../shared/observer-types";
 import type { PlanningView } from "../shared/planning";
@@ -80,6 +81,32 @@ const planning: PlanningView = {
   ],
   priorDay: { localDate: "2026-07-28", unresolvedTasks: [] },
 };
+const attention: AttentionSnapshot = {
+  capability: "shared_live",
+  connectionState: "connected",
+  liveRequestCoverage: "available",
+  items: [
+    ["approval", "Approval requested"],
+    ["direct_question", "Direct question"],
+    ["failed_turn", "Turn failed"],
+    ["interrupted_turn", "Turn interrupted"],
+    ["explicit_blocker", "Explicit blocker"],
+    ["possibly_stale", "Possibly stale · lower certainty"],
+  ].map(([kind, sourceLabel], index) => ({
+    id: `attention:${index}`,
+    sourceKey: `source:${index}`,
+    threadId: "onboarding-refresh",
+    turnId: null,
+    itemId: null,
+    kind: kind as AttentionSnapshot["items"][number]["kind"],
+    certainty: kind === "possibly_stale" ? "possible" : "explicit",
+    sourceOccurredAt: `2026-07-29T1${index}:00:00.000Z`,
+    lastDerivedAt: "2026-07-29T15:00:00.000Z",
+    sourceLabel,
+    lifecycle: "open",
+    localActionAt: null,
+  })),
+};
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -98,6 +125,7 @@ function mockSuccessfulApi() {
       if (url === "/api/day") return Promise.resolve(jsonResponse(representativeDay));
       if (url === "/api/planning") return Promise.resolve(jsonResponse(planning));
       if (url === "/api/observer") return Promise.resolve(jsonResponse(observer));
+      if (url === "/api/attention") return Promise.resolve(jsonResponse(attention));
       if (url === "/api/observer/threads/onboarding-refresh") {
         return Promise.resolve(
           jsonResponse({
@@ -182,6 +210,7 @@ describe("daily dashboard", () => {
         if (String(input) === "/api/health") return Promise.resolve(jsonResponse(health));
         if (String(input) === "/api/planning") return Promise.resolve(jsonResponse(planning));
         if (String(input) === "/api/observer") return Promise.resolve(jsonResponse(observer));
+        if (String(input) === "/api/attention") return Promise.resolve(jsonResponse(attention));
         return Promise.resolve(jsonResponse({ error: "Unavailable" }, { status: 503 }));
       }),
     );

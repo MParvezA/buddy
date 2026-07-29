@@ -21,7 +21,7 @@ export default defineConfig({
   ],
   webServer: {
     command:
-      "CODEX_DAILY_DB_PATH=:memory: CODEX_DAILY_LOCAL_DATE=2026-07-29 CODEX_DAILY_CODEX_PATH=./test/fixtures/fake-codex-app-server.py npm run start",
+      "CODEX_DAILY_DB_PATH=:memory: CODEX_DAILY_LOCAL_DATE=2026-07-29 CODEX_DAILY_OBSERVER_MODE=shared_live CODEX_DAILY_CODEX_PATH=./test/fixtures/fake-codex-app-server.py npm run start",
     url: "http://127.0.0.1:4317/api/health",
     reuseExistingServer: false,
     timeout: 30_000,

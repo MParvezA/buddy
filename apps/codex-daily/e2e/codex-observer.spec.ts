@@ -8,7 +8,9 @@ test("observer discovers paginated chats, links a task, and reads detail transie
 
   await expect(page.getByText("Codex connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Observed chat" }).first()).toBeVisible();
-  await expect(page.getByRole("link", { name: "Second observed chat" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Second observed chat", exact: true }).first(),
+  ).toBeVisible();
   await expect(page.getByText("Turn completed")).toBeVisible();
   await expect(page.getByText("Unplanned work").first()).toBeVisible();
 

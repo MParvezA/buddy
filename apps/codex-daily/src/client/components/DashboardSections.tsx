@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import type { DashboardSnapshot } from "../../shared/dashboard";
+import { NeedsYou } from "../features/attention/NeedsYou";
 import { PlanningSection } from "../features/planning/PlanningSection";
 import { LiveWorkSections } from "../features/live-work/LiveWorkSections";
 import { StatusBadge } from "./StatusBadge";
@@ -8,41 +9,10 @@ interface DashboardSectionsProps {
   snapshot: DashboardSnapshot;
 }
 
-function formatTime(value: string, timezone: string) {
-  return new Intl.DateTimeFormat("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: timezone,
-  }).format(new Date(value));
-}
-
 export function DashboardSections({ snapshot }: DashboardSectionsProps) {
   return (
     <div className="dashboard-stack" data-testid="dashboard-sections">
-      <section className="panel attention-panel" data-section-order="1" aria-labelledby="attention-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Priority 01</p>
-            <h2 id="attention-title">Needs your attention</h2>
-          </div>
-          <span className="count-pill">{snapshot.attention.length} open</span>
-        </div>
-        <ul className="card-list attention-list">
-          {snapshot.attention.map((item) => (
-            <li key={item.id} className={`attention-card certainty-${item.certainty}`}>
-              <div className="card-meta">
-                <StatusBadge tone={item.kind}>{item.label}</StatusBadge>
-                <time dateTime={item.occurredAt}>{formatTime(item.occurredAt, snapshot.timezone)}</time>
-              </div>
-              <h3>
-                <Link to={`/threads/${item.threadId}`}>{item.title}</Link>
-              </h3>
-              <p>{item.detail}</p>
-            </li>
-          ))}
-        </ul>
-      </section>
+      <NeedsYou timezone={snapshot.timezone} />
 
       <PlanningSection />
 

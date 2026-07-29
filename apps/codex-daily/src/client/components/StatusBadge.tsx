@@ -1,4 +1,5 @@
-import type { AttentionKind, ThreadStatus } from "../../shared/dashboard";
+import type { AttentionKind } from "../../shared/attention";
+import type { ThreadStatus } from "../../shared/dashboard";
 
 type StatusTone =
   | AttentionKind

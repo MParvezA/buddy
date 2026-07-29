@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import json
 import signal
-import sys
 import threading
+import sys
 
 initialized = False
 
@@ -40,6 +40,9 @@ def send(value):
     sys.stdout.flush()
 
 
+shared_live = "proxy" in sys.argv
+
+
 def live_fact():
     send(
         {
@@ -59,6 +62,80 @@ def live_fact():
             },
         }
     )
+    if shared_live:
+        send(
+            {
+                "id": 700,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": "thread-one",
+                    "turnId": "turn-approval",
+                    "itemId": "item-approval",
+                    "command": "SECRET COMMAND",
+                    "startedAtMs": 1785320100000,
+                },
+            }
+        )
+        send(
+            {
+                "id": 701,
+                "method": "item/tool/requestUserInput",
+                "params": {
+                    "threadId": "thread-one",
+                    "turnId": "turn-question",
+                    "itemId": "item-question",
+                    "questions": [{"question": "SECRET QUESTION"}],
+                },
+            }
+        )
+        send(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-two",
+                    "turn": {
+                        "id": "turn-failed",
+                        "items": [],
+                        "itemsView": "full",
+                        "status": "failed",
+                        "error": {"message": "SECRET FAILURE"},
+                        "startedAt": 1785320110,
+                        "completedAt": 1785320120,
+                    },
+                },
+            }
+        )
+        send(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-two",
+                    "turn": {
+                        "id": "turn-interrupted",
+                        "items": [],
+                        "itemsView": "full",
+                        "status": "interrupted",
+                        "error": None,
+                        "startedAt": 1785320130,
+                        "completedAt": 1785320140,
+                    },
+                },
+            }
+        )
+        send(
+            {
+                "method": "thread/goal/updated",
+                "params": {
+                    "threadId": "thread-two",
+                    "turnId": "turn-blocked",
+                    "goal": {
+                        "status": "blocked",
+                        "updatedAt": 1785320150,
+                        "objective": "SECRET BLOCKER",
+                    },
+                },
+            }
+        )
 
 
 signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))

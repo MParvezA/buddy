@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 04: Needs You` (this status-bearing commit)
+Verification: `npm run check` passed with 16 files/44 tests; independent Playwright verification passed 7 browser flows with 3 intentional duplicate mobile-flow skips; repository contracts passed 4/4; protected-path diff was empty. Focused tests prove exact 30-minute staleness, shared-live-only requests, deterministic replay/resolution, local-only acknowledge/dismiss, lifecycle history, content stripping, and zero Codex transport actions.
+Deviations: Playwright required sandbox escalation to bind the loopback test server. `npm ci` reported seven existing dependency audit advisories; dependency remediation was not expanded into this slice.
+Follow-ups: None. FUP-001 through FUP-006 remain deferred.
 
 ## Context And Selected Slice
 

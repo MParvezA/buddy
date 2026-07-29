@@ -1,13 +1,6 @@
 import type { ObserverHealthState, ObserverMode } from "./observer-types.js";
 
 export type ConnectionState = "not-connected" | ObserverHealthState;
-export type AttentionKind =
-  | "approval"
-  | "question"
-  | "failure"
-  | "interruption"
-  | "blocker"
-  | "possibly-stale";
 export type ThreadStatus = "working" | "waiting" | "possibly-stale";
 
 export interface HealthResponse {
@@ -19,17 +12,6 @@ export interface HealthResponse {
     capability: ObserverMode;
     diagnostic: string | null;
   };
-}
-
-export interface AttentionItem {
-  id: string;
-  kind: AttentionKind;
-  label: string;
-  title: string;
-  detail: string;
-  occurredAt: string;
-  threadId: string;
-  certainty: "explicit" | "possible";
 }
 
 export interface WorkThread {
@@ -68,7 +50,6 @@ export interface DashboardSnapshot {
     label: string;
     detail: string;
   };
-  attention: AttentionItem[];
   activeThreads: WorkThread[];
   recentlyCompleted: CompletedWorkItem[];
   reportPreview: ReportPreview;

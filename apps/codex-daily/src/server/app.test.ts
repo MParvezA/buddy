@@ -35,14 +35,12 @@ describe("local service", () => {
       date: "2026-07-29",
       connection: { state: "not-connected" },
     });
-    expect(day.json<DashboardSnapshot>().attention.map((item) => item.kind)).toEqual([
-      "approval",
-      "question",
-      "failure",
-      "interruption",
-      "blocker",
-      "possibly-stale",
-    ]);
+    const attention = await app.inject({ method: "GET", url: "/api/attention" });
+    expect(attention.json()).toMatchObject({
+      capability: "standalone_history",
+      liveRequestCoverage: "external_clients_unavailable",
+      items: [],
+    });
   });
 
   it("adds an empty durable planning resource without changing representative monitoring", async () => {

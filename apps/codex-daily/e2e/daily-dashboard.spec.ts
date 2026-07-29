@@ -28,7 +28,10 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
 
 test("built app routes through thread, report, settings, and back to Today", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Observed chat" }).first().click();
+  await page
+    .getByRole("link", { name: "Observed chat", exact: true })
+    .first()
+    .click();
   await expect(page).toHaveURL(/\/threads\/thread-one$/);
   await expect(
     page

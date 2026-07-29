@@ -594,8 +594,8 @@ h3 {
 }
 
 .status-approval,
-.status-question,
-.status-blocker,
+.status-direct_question,
+.status-explicit_blocker,
 .status-waiting,
 .status-pending {
   border-color: rgba(233, 184, 108, 0.22);
@@ -603,19 +603,73 @@ h3 {
   color: var(--amber);
 }
 
-.status-failure,
-.status-interruption,
+.status-failed_turn,
+.status-interrupted_turn,
 .status-blocked {
   border-color: rgba(239, 141, 131, 0.24);
   background: var(--red-soft);
   color: var(--red);
 }
 
-.status-possibly-stale {
+.status-possibly-stale,
+.status-possibly_stale {
   border-style: dashed;
   border-color: rgba(145, 185, 238, 0.3);
   background: var(--blue-soft);
   color: var(--blue);
+}
+
+.attention-source,
+.attention-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.attention-source {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.attention-source a {
+  color: var(--mint);
+  text-underline-offset: 3px;
+}
+
+.attention-actions {
+  justify-content: flex-start;
+}
+
+.compact-button {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.attention-readonly-note {
+  margin: 13px 0 0;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.capability-notice {
+  margin-bottom: 13px;
+  border-style: solid;
+}
+
+.attention-error {
+  border-color: rgba(239, 141, 131, 0.35);
+  color: var(--red);
+}
+
+.detail-subheading {
+  margin: 22px 0 10px;
+  color: var(--text);
+  font-size: 13px;
 }
 
 .status-confirmed,

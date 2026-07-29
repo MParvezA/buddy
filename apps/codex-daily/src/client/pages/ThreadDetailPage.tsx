@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import type { AttentionItem } from "../../shared/attention";
 import type { TransientThreadDetail } from "../../shared/observer-types";
+import { getThreadAttention } from "../api/attention-client";
 import { getThreadDetail } from "../api/observer-client";
 import { StatusBadge } from "../components/StatusBadge";
 import { useObserver } from "../data/observer-context";
@@ -10,6 +12,7 @@ export function ThreadDetailPage() {
   const observer = useObserver();
   const [detail, setDetail] = useState<TransientThreadDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attentionHistory, setAttentionHistory] = useState<AttentionItem[]>([]);
   const thread = observer.snapshot?.threads.find((item) => item.id === threadId) ?? null;
   const activities =
     observer.snapshot?.activities.filter((item) => item.threadId === threadId) ?? [];
@@ -24,6 +27,20 @@ export function ThreadDetailPage() {
         if (active) {
           setError(reason instanceof Error ? reason.message : "Thread detail could not be read.");
         }
+      });
+    return () => {
+      active = false;
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    let active = true;
+    getThreadAttention(threadId)
+      .then((value) => {
+        if (active) setAttentionHistory(value);
+      })
+      .catch(() => {
+        if (active) setAttentionHistory([]);
       });
     return () => {
       active = false;
@@ -85,6 +102,18 @@ export function ThreadDetailPage() {
                 {activities.map((item) => (
                   <li key={item.sourceKey}>
                     {item.label} · <time dateTime={item.occurredAt}>{item.occurredAt}</time>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <h3 className="detail-subheading">Attention projection history</h3>
+            {attentionHistory.length === 0 ? (
+              <p>No attention projections are retained for this thread.</p>
+            ) : (
+              <ul className="signal-list">
+                {attentionHistory.map((item) => (
+                  <li key={item.id}>
+                    {item.sourceLabel} · {item.lifecycle.replace("_", " ")}
                   </li>
                 ))}
               </ul>

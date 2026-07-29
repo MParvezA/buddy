@@ -35,7 +35,7 @@ export interface SessionBriefLastGood extends SessionBriefContent {
   sourceUpdatedAt: string;
   generatedAt: string;
   generator: string;
-  modelId: string | null;
+  modelId: "gpt-5.6-sol";
 }
 
 export interface SessionBriefFailure {

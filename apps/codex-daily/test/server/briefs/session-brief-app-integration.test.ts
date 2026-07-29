@@ -96,6 +96,7 @@ describe("session brief application workflow", () => {
       JSON.stringify(briefs.json()),
       JSON.stringify(exported.json()),
       JSON.stringify(diagnostics.json()),
+      readFileSync(requestLog, "utf8"),
       readFileSync(databasePath).toString("utf8"),
       existsSync(`${databasePath}-wal`)
         ? readFileSync(`${databasePath}-wal`).toString("utf8")

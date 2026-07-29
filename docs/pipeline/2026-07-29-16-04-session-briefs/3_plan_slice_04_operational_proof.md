@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 04: Operational Proof` (this status-bearing commit)
+Verification: `npm ci` passed without lockfile changes; `npm run check` passed with 43 files/155 tests; full Playwright passed 20 runnable flows with 8 intentional mobile mutation skips; installed `codex-cli 0.146.0-alpha.3.1` schema generation passed; repository contracts passed 4/4; `colcon list` remained 16 and all 16 ROS packages built; production SIGINT/SIGTERM smokes, SQLite reopen/quick-check/foreign-key checks, privacy artifact scans, whitespace, and protected-range checks passed. ROS reported 233 tests, one unchanged `buddy_bringup` `pytest.missing_result` error, zero failures, and 13 skips.
+Deviations: Playwright required host-context execution after sandboxed `tsx` IPC failed with `EPERM`; `npm ci` retained seven existing high-severity audit advisories. Exactly one synthetic-only installed-host model proof was attempted and stopped after 37 ms with the formerly coarse safe category `contract_failed`; it read no history and used no fallback, but live Sol success remains unproven. The proof now distinguishes future `host_unavailable`, `request_rejected`, and `model_contract_failed` outcomes without exposing raw errors; the historical redacted result cannot be reclassified safely and was not retried.
+Follow-ups: None. `FUP-001` through `FUP-005` remain deferred.
 
 ## Context And Selected Slice
 

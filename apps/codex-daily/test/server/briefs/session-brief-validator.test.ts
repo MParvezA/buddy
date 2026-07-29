@@ -46,7 +46,7 @@ describe("session brief validation", () => {
         generator: "deterministic_placeholder",
         modelId: null,
       }),
-    ).toThrow("provenance");
+    ).toThrow("model ID");
     expect(() =>
       assertSessionBriefLastGood({
         currentState:

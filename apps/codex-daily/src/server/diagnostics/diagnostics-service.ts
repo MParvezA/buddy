@@ -3,6 +3,7 @@ import { ObserverService } from "../codex/observer-service.js";
 import { PrivacyService } from "../privacy/privacy-service.js";
 import { ReportRepository } from "../reports/report-repository.js";
 import { ReportScheduler } from "../reports/report-scheduler.js";
+import { SessionBriefService } from "../briefs/session-brief-service.js";
 
 export interface DiagnosticsServiceOptions {
   dataLocation: string;
@@ -10,6 +11,7 @@ export interface DiagnosticsServiceOptions {
   observer: ObserverService;
   scheduler: ReportScheduler;
   reports: ReportRepository;
+  sessionBriefs: SessionBriefService;
   version: string;
 }
 
@@ -34,6 +36,7 @@ export class DiagnosticsService {
         lastFactualReportAt: latest?.createdAt ?? null,
         lastNarrativeOutcome: latest?.narrative.status ?? null,
       },
+      sessionBriefs: this.options.sessionBriefs.operationalDiagnostics(),
       runtime: {
         application: "codex-daily",
         version: this.options.version,

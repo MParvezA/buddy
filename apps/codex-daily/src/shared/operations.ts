@@ -58,6 +58,29 @@ export interface ReportOperationalDiagnostics {
   lastNarrativeOutcome: "ready" | "failed" | "not_requested" | "pending" | null;
 }
 
+export interface SessionBriefOperationalDiagnostics {
+  selectedRecentSessions: number;
+  queued: number;
+  retryWaiting: number;
+  analyzing: number;
+  readyCurrent: number;
+  stale: number;
+  unavailable: number;
+  failed: number;
+  configuredWorkerConcurrency: number;
+  activeWorkerCount: number;
+  observedPeakWorkerConcurrency: number;
+  lastSuccessfulGenerationAt: string | null;
+  lastSuccessfulModelId: "gpt-5.6-sol" | null;
+  lastFailureCategory: SessionBriefFailureCategory | null;
+  lastFailureAt: string | null;
+  retainedRetryCount: number;
+  lastPruneAt: string | null;
+  lastPrunedRowCount: number;
+  orphanJobsRecoveredAtStartup: number;
+  shutdownState: "running" | "draining" | "paused" | "stopped";
+}
+
 export interface OperationsDiagnostics {
   localOnly: true;
   dataLocation: string;
@@ -72,6 +95,7 @@ export interface OperationsDiagnostics {
   observer: ObserverOperationalDiagnostics;
   scheduler: SchedulerOperationalDiagnostics;
   reports: ReportOperationalDiagnostics;
+  sessionBriefs: SessionBriefOperationalDiagnostics;
   runtime: {
     application: "codex-daily";
     version: string;

@@ -45,6 +45,28 @@ const diagnostics: OperationsDiagnostics = {
     lastFactualReportAt: null,
     lastNarrativeOutcome: null,
   },
+  sessionBriefs: {
+    selectedRecentSessions: 10,
+    queued: 2,
+    retryWaiting: 1,
+    analyzing: 2,
+    readyCurrent: 4,
+    stale: 1,
+    unavailable: 0,
+    failed: 1,
+    configuredWorkerConcurrency: 2,
+    activeWorkerCount: 1,
+    observedPeakWorkerConcurrency: 2,
+    lastSuccessfulGenerationAt: "2026-07-29T12:05:00.000Z",
+    lastSuccessfulModelId: "gpt-5.6-sol",
+    lastFailureCategory: "timeout",
+    lastFailureAt: "2026-07-29T12:06:00.000Z",
+    retainedRetryCount: 2,
+    lastPruneAt: "2026-07-29T12:00:00.000Z",
+    lastPrunedRowCount: 1,
+    orphanJobsRecoveredAtStartup: 1,
+    shutdownState: "running",
+  },
   runtime: {
     application: "codex-daily",
     version: "0.1.0",
@@ -123,6 +145,9 @@ describe("Settings local-data controls", () => {
     );
     expect(await screen.findByText("005_operational_hardening.sql", { exact: false })).toBeVisible();
     expect(screen.getByText("3 replayed/deduplicated; 1 ignored")).toBeVisible();
+    expect(screen.getByText("10 selected; 4 current; 1 stale")).toBeVisible();
+    expect(screen.getByText("1 active; 2 peak of 2; running")).toBeVisible();
+    expect(screen.getByText(/gpt-5.6-sol at/)).toBeVisible();
     expect(screen.getByRole("link", { name: "Export JSON" })).toHaveAttribute(
       "href",
       "/api/operations/export",

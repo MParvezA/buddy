@@ -91,25 +91,29 @@ describe("GPT-5.6 session brief gateway", () => {
     });
     const turn = requests.find((request) =>
       request.method === "turn/start" &&
-      String((request.params as Record<string, unknown>).threadId).startsWith(
-        "codex-daily-analysis-",
-      )
+      request.analysisThread === true
     )!;
-    const turnParams = turn.params as Record<string, unknown>;
-    expect(turnParams).toMatchObject({
+    expect(turn).toMatchObject({
       model: "gpt-5.6-sol",
       effort: "medium",
       environments: [],
-      input: [{ type: "text", text: expect.any(String) }],
       outputSchema: {
         type: "object",
         additionalProperties: false,
       },
+      inputCharacterCount: expect.any(Number),
+      inputSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
-    expect(Array.from(
-      ((turnParams.input as Array<{ text: string }>)[0]?.text ?? ""),
-    ).length).toBeLessThanOrEqual(32_000);
-    expect(JSON.stringify(turnParams)).not.toMatch(
+    expect(turn.inputCharacterCount).toBeLessThanOrEqual(32_000);
+    expect(turn.parameterKeys).toEqual([
+      "effort",
+      "environments",
+      "input",
+      "model",
+      "outputSchema",
+      "threadId",
+    ]);
+    expect(JSON.stringify(turn)).not.toMatch(
       /STRUCTURED_TOKEN_MUST_DROP|SYNTHETIC_REASONING_SECRET|unsupported\.png/,
     );
     expect(observer.snapshot().threads.map((item) => item.id)).not.toContain(

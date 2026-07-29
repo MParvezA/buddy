@@ -327,6 +327,44 @@ export function SettingsPage() {
                 )}; narrative ${diagnostics.reports.lastNarrativeOutcome ?? "none"}`}
               />
               <Diagnostic
+                label="Recent-session briefs"
+                value={`${diagnostics.sessionBriefs.selectedRecentSessions} selected; ${diagnostics.sessionBriefs.readyCurrent} current; ${diagnostics.sessionBriefs.stale} stale`}
+              />
+              <Diagnostic
+                label="Durable brief jobs"
+                value={`${diagnostics.sessionBriefs.queued} queued; ${diagnostics.sessionBriefs.retryWaiting} retry-waiting; ${diagnostics.sessionBriefs.analyzing} analyzing; ${diagnostics.sessionBriefs.failed} failed; ${diagnostics.sessionBriefs.unavailable} unavailable`}
+              />
+              <Diagnostic
+                label="Active brief workers"
+                value={`${diagnostics.sessionBriefs.activeWorkerCount} active; ${diagnostics.sessionBriefs.observedPeakWorkerConcurrency} peak of ${diagnostics.sessionBriefs.configuredWorkerConcurrency}; ${diagnostics.sessionBriefs.shutdownState}`}
+              />
+              <Diagnostic
+                label="Last brief generation"
+                value={
+                  diagnostics.sessionBriefs.lastSuccessfulGenerationAt
+                    ? `${diagnostics.sessionBriefs.lastSuccessfulModelId} at ${formatTime(
+                        diagnostics.sessionBriefs.lastSuccessfulGenerationAt,
+                      )}`
+                    : "Never"
+                }
+              />
+              <Diagnostic
+                label="Last brief failure"
+                value={
+                  diagnostics.sessionBriefs.lastFailureCategory
+                    ? `${diagnostics.sessionBriefs.lastFailureCategory} at ${formatTime(
+                        diagnostics.sessionBriefs.lastFailureAt,
+                      )}`
+                    : "None"
+                }
+              />
+              <Diagnostic
+                label="Brief maintenance"
+                value={`${diagnostics.sessionBriefs.retainedRetryCount} retained retries; ${diagnostics.sessionBriefs.lastPrunedRowCount} rows pruned at ${formatTime(
+                  diagnostics.sessionBriefs.lastPruneAt,
+                )}; ${diagnostics.sessionBriefs.orphanJobsRecoveredAtStartup} orphan jobs recovered`}
+              />
+              <Diagnostic
                 label="Runtime"
                 value={`${diagnostics.runtime.application} ${diagnostics.runtime.version} · ${diagnostics.runtime.node}`}
               />

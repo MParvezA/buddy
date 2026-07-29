@@ -275,39 +275,6 @@ export class SessionBriefRepository {
     ) > 0;
   }
 
-  deletePlaceholderArtifacts(): number {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db
-        .prepare(`
-          DELETE FROM session_brief_jobs
-          WHERE thread_id IN (
-            SELECT thread_id FROM session_briefs
-            WHERE generator = 'deterministic_placeholder'
-          )
-        `)
-        .run();
-      const removed = Number(
-        this.db
-          .prepare(
-            "DELETE FROM session_briefs WHERE generator = 'deterministic_placeholder'",
-          )
-          .run().changes,
-      );
-      this.db
-        .prepare(`
-          DELETE FROM session_brief_jobs
-          WHERE thread_id NOT IN (SELECT id FROM observed_threads)
-        `)
-        .run();
-      this.db.exec("COMMIT");
-      return removed;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
   promote(
     jobId: string,
     threadId: string,
@@ -315,7 +282,7 @@ export class SessionBriefRepository {
     result: {
       content: SessionBriefContent;
       generator: string;
-      modelId: string | null;
+      modelId: string;
     },
     now: string,
     expectedCoordinatorEpoch: number,
@@ -397,7 +364,7 @@ export class SessionBriefRepository {
     selectedThreadIds: string[],
     now: string,
     expiryCutoff: string,
-  ): void {
+  ): number {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const selected = new Set(selectedThreadIds);
@@ -432,13 +399,14 @@ export class SessionBriefRepository {
             .run(row.thread_id);
         }
       }
-      this.db
+      const pruned = Number(this.db
         .prepare(`
           DELETE FROM session_briefs
           WHERE out_of_window_at IS NOT NULL AND out_of_window_at <= ?
         `)
-        .run(expiryCutoff);
+        .run(expiryCutoff).changes);
       this.db.exec("COMMIT");
+      return pruned;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

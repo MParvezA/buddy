@@ -9,6 +9,7 @@ import type {
   SessionBriefSnapshot,
   SessionBriefSseEvent,
 } from "../../shared/session-briefs.js";
+import type { SessionBriefOperationalDiagnostics } from "../../shared/operations.js";
 import type { ObserverService } from "../codex/observer-service.js";
 import {
   SessionBriefAnalysisError,
@@ -74,6 +75,11 @@ export class SessionBriefService extends EventEmitter {
   private epoch = 0;
   private retentionTimer: ReturnType<typeof setInterval> | null = null;
   private dueTimer: ReturnType<typeof setTimeout> | null = null;
+  private observedPeakConcurrency = 0;
+  private lastPruneAt: string | null = null;
+  private lastPrunedRowCount = 0;
+  private orphanJobsRecoveredAtStartup = 0;
+  private shutdownState: SessionBriefOperationalDiagnostics["shutdownState"] = "stopped";
 
   private readonly observerListener = (event: { snapshot: ObserverSnapshot }) => {
     this.reconcile(event.snapshot);
@@ -100,15 +106,18 @@ export class SessionBriefService extends EventEmitter {
     if (this.started) return;
     this.started = true;
     this.acceptingWork = true;
+    this.shutdownState = "running";
     this.epoch = this.repository.advanceCoordinatorEpoch();
     const now = this.clock().toISOString();
-    this.repository.deletePlaceholderArtifacts();
-    this.repository.recoverAnalyzing(now);
-    this.repository.prune(this.expiryCutoff());
+    this.orphanJobsRecoveredAtStartup = this.repository.recoverAnalyzing(now);
+    this.recordPrune(this.repository.prune(this.expiryCutoff()), now);
     this.observer.on("snapshot", this.observerListener);
     this.retentionTimer = this.setIntervalFn(() => {
       if (!this.started || !this.acceptingWork) return;
-      if (this.repository.prune(this.expiryCutoff())) this.publish();
+      const pruneNow = this.clock().toISOString();
+      const pruned = this.repository.prune(this.expiryCutoff());
+      this.recordPrune(pruned, pruneNow);
+      if (pruned) this.publish();
     }, this.retentionIntervalMs);
     this.reconcile(this.observer.snapshot());
   }
@@ -124,15 +133,18 @@ export class SessionBriefService extends EventEmitter {
 
   async pauseAndDrain(): Promise<void> {
     this.acceptingWork = false;
+    this.shutdownState = "draining";
     this.epoch = this.repository.advanceCoordinatorEpoch();
     this.clearDueTimer();
     for (const work of this.running.values()) work.controller.abort();
     await Promise.allSettled([...this.running.values()].map((work) => work.promise));
+    this.shutdownState = this.started ? "paused" : "stopped";
   }
 
   resume(): void {
     if (!this.started) return;
     this.acceptingWork = true;
+    this.shutdownState = "running";
     this.epoch = this.repository.advanceCoordinatorEpoch();
     this.repository.recoverAnalyzing(this.clock().toISOString());
     this.reconcile(this.observer.snapshot());
@@ -164,6 +176,56 @@ export class SessionBriefService extends EventEmitter {
       stale: items.filter((item) => item.freshness === "stale").length,
       unavailable: count(items, "unavailable"),
       failed: count(items, "failed"),
+    };
+  }
+
+  operationalDiagnostics(): SessionBriefOperationalDiagnostics {
+    const snapshot = this.snapshot();
+    const selectedIds = new Set(this.selected.map((item) => item.threadId));
+    const jobs = this.repository
+      .listJobsForExport()
+      .filter((job) => selectedIds.has(job.threadId));
+    const successful = this.repository
+      .listBriefRowsForExport()
+      .sort((left, right) =>
+        right.lastGood.generatedAt.localeCompare(left.lastGood.generatedAt)
+      )[0]?.lastGood ?? null;
+    const lastFailure = jobs
+      .filter((job) => job.failureAt && job.failureCategory)
+      .sort((left, right) =>
+        (right.failureAt ?? "").localeCompare(left.failureAt ?? "")
+      )[0] ?? null;
+    const retryWaiting = jobs.filter(
+      (job) => job.status === "queued" && job.reason === "retry",
+    ).length;
+    const queuedJobs = jobs.filter((job) => job.status === "queued").length;
+    return {
+      selectedRecentSessions: snapshot.total,
+      queued: Math.max(0, queuedJobs - retryWaiting),
+      retryWaiting,
+      analyzing: jobs.filter((job) => job.status === "analyzing").length,
+      readyCurrent: snapshot.items.filter(
+        (item) =>
+          item.analysisStatus === "ready" && item.freshness === "current",
+      ).length,
+      stale: snapshot.stale,
+      unavailable: snapshot.unavailable,
+      failed: snapshot.failed,
+      configuredWorkerConcurrency: this.concurrency,
+      activeWorkerCount: this.running.size,
+      observedPeakWorkerConcurrency: this.observedPeakConcurrency,
+      lastSuccessfulGenerationAt: successful?.generatedAt ?? null,
+      lastSuccessfulModelId: successful?.modelId ?? null,
+      lastFailureCategory: lastFailure?.failureCategory ?? null,
+      lastFailureAt: lastFailure?.failureAt ?? null,
+      retainedRetryCount: jobs.reduce(
+        (total, job) => total + Math.max(0, job.attemptCount - 1),
+        0,
+      ),
+      lastPruneAt: this.lastPruneAt,
+      lastPrunedRowCount: this.lastPrunedRowCount,
+      orphanJobsRecoveredAtStartup: this.orphanJobsRecoveredAtStartup,
+      shutdownState: this.shutdownState,
     };
   }
 
@@ -221,11 +283,12 @@ export class SessionBriefService extends EventEmitter {
       updatedAt: thread.updatedAt,
     }));
     this.selectedAt = now;
-    this.repository.reconcileWindow(
+    const pruned = this.repository.reconcileWindow(
       this.selected.map((item) => item.threadId),
       now,
       this.expiryCutoff(),
     );
+    this.recordPrune(pruned, now);
     if (usableSnapshot(snapshot) && this.acceptingWork) {
       for (const selected of this.selected) {
         const item = this.repository.item(
@@ -273,6 +336,10 @@ export class SessionBriefService extends EventEmitter {
       const epoch = this.epoch;
       const promise = this.run(marked, controller.signal, epoch);
       this.running.set(marked.jobId, { promise, controller });
+      this.observedPeakConcurrency = Math.max(
+        this.observedPeakConcurrency,
+        this.running.size,
+      );
       void promise.finally(() => {
         this.running.delete(marked.jobId);
         this.publish();
@@ -415,6 +482,11 @@ export class SessionBriefService extends EventEmitter {
 
   private expiryCutoff(): string {
     return new Date(this.clock().getTime() - RETENTION_MS).toISOString();
+  }
+
+  private recordPrune(count: number, at: string): void {
+    this.lastPruneAt = at;
+    this.lastPrunedRowCount = count;
   }
 
   private publish(): void {

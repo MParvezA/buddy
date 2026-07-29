@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import hashlib
 import signal
 import threading
 import sys
@@ -50,6 +51,43 @@ def thread(thread_id, **overrides):
 def send(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+def safe_request_record(message):
+    method = message.get("method")
+    params = message.get("params", {})
+    if method == "thread/read":
+        return {
+            "method": method,
+            "includeTurns": params.get("includeTurns") is True,
+            "sourceThread": "ordinary",
+        }
+    if method == "thread/start":
+        return {
+            "method": method,
+            "params": params,
+        }
+    if method == "turn/start":
+        input_value = params.get("input", [])
+        input_text = "".join(
+            item.get("text", "")
+            for item in input_value
+            if isinstance(item, dict)
+            and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        )
+        thread_id = params.get("threadId")
+        return {
+            "method": method,
+            "analysisThread": thread_id in analysis_threads,
+            "parameterKeys": sorted(params.keys()),
+            "model": params.get("model"),
+            "effort": params.get("effort"),
+            "environments": params.get("environments"),
+            "outputSchema": params.get("outputSchema"),
+            "inputCharacterCount": len(input_text),
+            "inputSha256": hashlib.sha256(input_text.encode("utf-8")).hexdigest(),
+        }
+    return {"method": method}
 
 
 shared_live = "proxy" in sys.argv
@@ -192,7 +230,9 @@ for line in sys.stdin:
             handle.write(method + "\n")
     if request_log and method in {"thread/read", "thread/start", "turn/start"}:
         with open(request_log, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(message, separators=(",", ":")) + "\n")
+            handle.write(
+                json.dumps(safe_request_record(message), separators=(",", ":")) + "\n"
+            )
     if method == "initialize":
         send(
             {

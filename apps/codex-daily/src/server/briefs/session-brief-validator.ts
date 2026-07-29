@@ -110,7 +110,7 @@ export function assertSessionBriefLastGood(
   if (!isExactObject(value, keys)) {
     throw new Error("Stored session brief must contain the exact expected fields.");
   }
-  if (value.modelId !== null && typeof value.modelId !== "string") {
+  if (typeof value.modelId !== "string") {
     throw new Error("Session brief model ID is invalid.");
   }
   const content = assertSessionBriefContent({
@@ -126,8 +126,7 @@ export function assertSessionBriefLastGood(
     sourceUpdatedAt: safeText(value.sourceUpdatedAt, 100, "sourceUpdatedAt"),
     generatedAt: safeText(value.generatedAt, 100, "generatedAt"),
     generator: safeText(value.generator, 100, "generator"),
-    modelId:
-      value.modelId === null ? null : safeText(value.modelId, 100, "modelId"),
+    modelId: safeText(value.modelId, 100, "modelId") as "gpt-5.6-sol",
   };
   if (
     stored.generator !== "codex_app_server" ||

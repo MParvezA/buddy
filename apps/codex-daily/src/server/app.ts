@@ -192,6 +192,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     observer,
     scheduler: reportScheduler,
     reports: reportRepository,
+    sessionBriefs,
     version: options.version ?? "0.1.0",
   });
   const writeReleases = new WeakMap<object, () => void>();

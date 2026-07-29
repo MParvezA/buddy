@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
 import subprocess
@@ -220,6 +221,55 @@ def _output_text(output: bytearray, truncated: bool) -> str:
     """Decode a retained output prefix without hiding truncation from diagnostics."""
     suffix = ' [output truncated]' if truncated else ''
     return output.decode(errors='replace') + suffix
+
+
+def _deliver_piper_stdin(
+        child: _ChildProcess,
+        text: str,
+        *,
+        cancel_event: Event,
+        deadline_monotonic: float) -> None:
+    """Write Piper text without a blocking pipe write or detached worker."""
+    stdin = child.process.stdin
+    if stdin is None:
+        raise SpeechSynthesisError('Piper stdin is unavailable')
+    payload = text.encode()
+    offset = 0
+    try:
+        descriptor = stdin.fileno()
+        os.set_blocking(descriptor, False)
+        while offset < len(payload):
+            if cancel_event.is_set():
+                raise SpeechSynthesisCancelled('Piper synthesis cancelled')
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0.0:
+                raise SpeechSynthesisTimeout('Piper synthesis timed out')
+            try:
+                _, writable, _ = select.select([], [descriptor], [], min(0.05, remaining))
+            except OSError as error:
+                raise SpeechSynthesisError(f'Piper stdin delivery failed: {error}') from error
+            if not writable:
+                continue
+            try:
+                written = os.write(descriptor, payload[offset:offset + 65_536])
+            except (BlockingIOError, InterruptedError):
+                continue
+            except BrokenPipeError as error:
+                raise SpeechSynthesisError('Piper closed stdin before synthesis') from error
+            if written <= 0:
+                raise SpeechSynthesisError('Piper accepted no synthesis input')
+            offset += written
+        if cancel_event.is_set():
+            raise SpeechSynthesisCancelled('Piper synthesis cancelled')
+        if time.monotonic() >= deadline_monotonic:
+            raise SpeechSynthesisTimeout('Piper synthesis timed out')
+    finally:
+        # No data is buffered in this Python stream: writes above use os.write.
+        # Closing delivers EOF without leaving a background writer alive.
+        try:
+            stdin.close()
+        except BrokenPipeError:
+            pass
 
 
 def _pcm_wav_properties(path: Path) -> tuple[int, int, int, int, str]:
@@ -506,9 +556,12 @@ class PiperTextToSpeechProvider:
         deadline = min(deadline_monotonic, time.monotonic() + self._synthesis_timeout_seconds)
         try:
             process = _start(argv, stdin=True)
-            assert process.process.stdin is not None
-            process.process.stdin.write(text.encode())
-            process.process.stdin.close()
+            _deliver_piper_stdin(
+                process,
+                text,
+                cancel_event=cancel_event,
+                deadline_monotonic=deadline,
+            )
             while process.poll() is None:
                 if cancel_event.is_set():
                     _terminate(process)
@@ -524,9 +577,13 @@ class PiperTextToSpeechProvider:
             duration = _validate_piper_wav(wav_path)
             return SynthesizedSpeech(duration, wav_path)
         except (SpeechSynthesisCancelled, SpeechSynthesisTimeout, SpeechSynthesisError):
+            if process is not None and process.poll() is None:
+                _terminate(process)
             wav_path.unlink(missing_ok=True)
             raise
         except Exception as error:
+            if process is not None and process.poll() is None:
+                _terminate(process)
             wav_path.unlink(missing_ok=True)
             raise SpeechSynthesisError(f'Piper synthesis failed: {error}') from error
         finally:

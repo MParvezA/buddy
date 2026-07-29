@@ -252,6 +252,14 @@ class BuddySpeakNode(Node):
             except SpeechPlaybackError as error:
                 return self._failed_result(
                     goal_handle, result, VOICE_ERROR_PLAYBACK, str(error), speech)
+            except Exception as error:
+                return self._failed_result(
+                    goal_handle,
+                    result,
+                    VOICE_ERROR_PLAYBACK,
+                    f'unexpected speech playback failure: {error}',
+                    speech,
+                )
             finally:
                 # Playback cancellation and every failure path must discard the
                 # native WAV before the action result is returned.
@@ -262,6 +270,7 @@ class BuddySpeakNode(Node):
                 return self._failed_result(
                     goal_handle, result, VOICE_ERROR_PLAYBACK,
                     'speech playback interrupted during node shutdown', speech)
+            self._feedback(goal_handle, Speak.Feedback.STATE_SPEAKING, 1.0, 'speaking')
             goal_handle.succeed()
             result.outcome = Speak.Result.OUTCOME_SUCCEEDED
             result.audio_duration = _duration_message(speech.duration_seconds)

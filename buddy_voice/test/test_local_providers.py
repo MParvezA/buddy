@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from threading import Event, Thread
-import json
 import time
-
-import pytest
 
 from buddy_voice.local_providers import (
     LocalProviderError,
@@ -17,16 +15,17 @@ from buddy_voice.local_providers import (
     PipeWirePushToTalkAudioInput,
     SpeechPlaybackCancelled,
     SttError,
-    WhisperCppSpeechToTextProvider,
     validate_capture_seconds,
     validate_stt_language,
     validate_stt_threads,
     validate_stt_timeout_seconds,
     validate_tts_playback_timeout_seconds,
     validate_tts_synthesis_timeout_seconds,
+    WhisperCppSpeechToTextProvider,
 )
 from buddy_voice.providers import SynthesizedSpeech
 from buddy_voice.speak_node import BuddySpeakNode
+import pytest
 
 
 def _script(path: Path, source: str) -> Path:
@@ -61,12 +60,12 @@ def test_language_validation_accepts_only_profile_languages() -> None:
 
 
 def test_pipewire_capture_uses_argv_and_removes_failed_audio(tmp_path: Path) -> None:
-    """PipeWire records the exact 16kHz mono format and cleans failures."""
-    recorder = _script(tmp_path / 'pw-record', '''
+    """Record the exact 16kHz mono format and clean failures."""
+    recorder = _script(tmp_path / 'pw-record', """
 import sys, time
 time.sleep(0.03)
 sys.exit(7)
-''')
+""")
     source = PipeWirePushToTalkAudioInput(
         record_binary=recorder, device='WH-CH520', maximum_capture_seconds=1,
         temp_directory=tmp_path)
@@ -78,19 +77,23 @@ sys.exit(7)
 
 
 def test_pipewire_capture_returns_valid_temporary_wav(tmp_path: Path) -> None:
-    """A fake pw-record process is terminated/reaped after terminal release."""
-    recorder = _script(tmp_path / 'pw-record', '''
+    """Capture sends SIGINT first and escalates to TERM when it is ignored."""
+    recorder = _script(tmp_path / 'pw-record', """
 import json, signal, sys, time, wave
 path = sys.argv[-1]
 open(path + '.argv', 'w').write(json.dumps(sys.argv[1:]))
-def done(*_):
+signals = []
+def stop(*_):
+    signals.append('TERM')
+    open(path + '.signals', 'w').write(' '.join(signals))
     with wave.open(path, 'wb') as output:
         output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
         output.writeframes(b'\\0\\0' * 160)
     raise SystemExit(0)
-signal.signal(signal.SIGTERM, done)
+signal.signal(signal.SIGINT, lambda *_: signals.append('INT'))
+signal.signal(signal.SIGTERM, stop)
 while True: time.sleep(0.01)
-''')
+""")
     source = PipeWirePushToTalkAudioInput(
         record_binary=recorder, device='WH-CH520', maximum_capture_seconds=1,
         locale='de-DE', temp_directory=tmp_path)
@@ -106,21 +109,25 @@ while True: time.sleep(0.01)
     assert capture.audio_path is not None and capture.audio_path.exists()
     assert json.loads((Path(str(capture.audio_path) + '.argv')).read_text())[:-1] == [
         '--format', 's16', '--rate', '16000', '--channels', '1', '--target', 'WH-CH520']
+    assert Path(str(capture.audio_path) + '.signals').read_text() == 'INT TERM'
 
 
 def test_whisper_parses_json_and_discards_recording(tmp_path: Path) -> None:
     """whisper-cli receives an argv model/input/thread/language configuration."""
-    whisper = _script(tmp_path / 'whisper-cli', '''
+    whisper = _script(tmp_path / 'whisper-cli', """
 import json, pathlib, sys
 base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
 base.with_suffix('.json').write_text(json.dumps({'transcription': [{'text': ' Hallo Buddy '}] }))
 base.with_suffix('.argv').write_text(json.dumps(sys.argv[1:]))
-''')
+""")
     model = _asset(tmp_path / 'ggml-base.bin')
     audio = tmp_path / 'input.wav'
     import wave
     with wave.open(str(audio), 'wb') as output:
-        output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000); output.writeframes(b'\\0\\0')
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(b'\\0\\0')
     from buddy_voice.providers import AudioCapture
     provider = WhisperCppSpeechToTextProvider(binary=whisper, model=model, threads=2, language='de')
     transcripts = provider.transcribe(AudioCapture(b'', 0, 'en-US', audio))
@@ -131,6 +138,47 @@ base.with_suffix('.argv').write_text(json.dumps(sys.argv[1:]))
     whisper_args = json.loads((tmp_path / 'input.argv').read_text())
     assert whisper_args[whisper_args.index('-t') + 1] == '2'
     assert whisper_args[whisper_args.index('-l') + 1] == 'de'
+
+
+@pytest.mark.parametrize(
+    ('detected_language', 'expected_locale'),
+    (('en', 'en-US'), ('de', 'de-DE')),
+)
+def test_whisper_auto_uses_detected_result_language(
+        tmp_path: Path, detected_language: str, expected_locale: str) -> None:
+    """Automatic recognition supplies the English/German locale to Dialogue."""
+    whisper = _script(tmp_path / 'whisper-cli', f"""
+import json, pathlib, sys
+base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
+base.with_suffix('.json').write_text(json.dumps({{
+    'result': {{'language': '{detected_language}'}}, 'text': 'Buddy hello'}}))
+""")
+    model = _asset(tmp_path / 'ggml-base.bin')
+    audio = _asset(tmp_path / 'input.wav')
+    from buddy_voice.providers import AudioCapture
+    transcript = WhisperCppSpeechToTextProvider(
+        binary=whisper, model=model, language='auto').transcribe(
+            AudioCapture(b'', 0, 'en-US', audio))[0]
+    assert transcript.locale == expected_locale
+
+
+def test_noisy_whisper_child_is_drained_and_diagnostic_output_is_bounded(tmp_path: Path) -> None:
+    """A noisy local child neither blocks the poll loop nor grows retained output."""
+    whisper = _script(tmp_path / 'whisper-cli', """
+import sys
+sys.stderr.write('x' * (256 * 1024))
+sys.stderr.flush()
+sys.exit(7)
+""")
+    model = _asset(tmp_path / 'ggml-base.bin')
+    audio = _asset(tmp_path / 'input.wav')
+    from buddy_voice.providers import AudioCapture
+    started = time.monotonic()
+    with pytest.raises(SttError, match='output truncated') as error:
+        WhisperCppSpeechToTextProvider(binary=whisper, model=model).transcribe(
+            AudioCapture(b'', 0, 'en-US', audio))
+    assert time.monotonic() - started < 1.0
+    assert len(str(error.value)) < 70 * 1024
 
 
 def test_whisper_invalid_output_is_structured_and_discards_recording(tmp_path: Path) -> None:
@@ -159,18 +207,18 @@ def test_whisper_timeout_terminates_child_and_discards_recording(tmp_path: Path)
 
 def test_piper_selects_locale_and_cancels_playback_with_cleanup(tmp_path: Path) -> None:
     """Synthesis and actual PipeWire playback are separate cancellable phases."""
-    piper = _script(tmp_path / 'piper', '''
+    piper = _script(tmp_path / 'piper', """
 import sys, wave
 path = sys.argv[sys.argv.index('--output_file') + 1]
 with wave.open(path, 'wb') as output:
     output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
     output.writeframes(b'\\0\\0' * 320)
-''')
-    player = _script(tmp_path / 'pw-play', '''
+""")
+    player = _script(tmp_path / 'pw-play', """
 import signal, time
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
 while True: time.sleep(0.01)
-''')
+""")
     en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
     de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
     provider = PiperTextToSpeechProvider(
@@ -192,14 +240,14 @@ while True: time.sleep(0.01)
 
 
 def test_piper_playback_deadline_is_a_structured_timeout(tmp_path: Path) -> None:
-    """PipeWire playback has an independent deadline after successful synthesis."""
-    piper = _script(tmp_path / 'piper', '''
+    """Playback has an independent deadline after successful synthesis."""
+    piper = _script(tmp_path / 'piper', """
 import sys, wave
 path = sys.argv[sys.argv.index('--output_file') + 1]
 with wave.open(path, 'wb') as output:
     output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
     output.writeframes(b'\\0\\0' * 160)
-''')
+""")
     player = _script(tmp_path / 'pw-play', 'import time\ntime.sleep(2)\n')
     en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
     de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
@@ -270,4 +318,51 @@ def test_speak_action_only_succeeds_after_native_playback_and_cleanup(tmp_path: 
     assert goal.succeeded
     assert result.message == 'speech playback completed'
     assert provider.calls == ['synthesize', 'play', 'cleanup']
+    assert goal.feedback[-1].progress == 1.0
+    assert not wav.exists()
+
+
+def test_unexpected_native_playback_error_is_an_aborted_action_with_cleanup(
+        tmp_path: Path) -> None:
+    """Unexpected playback failures remain structured action/diagnostic failures."""
+    wav = _asset(tmp_path / 'speech.wav')
+
+    class Provider:
+        """Produces native audio then raises an untyped playback exception."""
+
+        def synthesize(self, text, voice, *, cancel_event, deadline_monotonic):
+            return SynthesizedSpeech(0.01, wav)
+
+        def play(self, speech, *, cancel_event, deadline_monotonic):
+            raise RuntimeError('player crashed')
+
+        def cleanup(self, speech):
+            speech.audio_path.unlink()
+
+    class Goal:
+        """Records frozen action terminal state and feedback."""
+
+        def __init__(self) -> None:
+            self.request = type('Request', (), {'text': 'hello', 'voice': ''})()
+            self.is_cancel_requested = False
+            self.aborted = False
+
+        def publish_feedback(self, value):
+            pass
+
+        def abort(self):
+            self.aborted = True
+
+    diagnostics = []
+    node = object.__new__(BuddySpeakNode)
+    node._text_to_speech = Provider()
+    node._synthesis_timeout_seconds = 1.0
+    node._playback_timeout_seconds = 1.0
+    node._publish_failure_diagnostic = lambda code, message: diagnostics.append((code, message))
+    goal = Goal()
+    result = node._execute_active(goal, Event())
+    assert goal.aborted
+    assert result.outcome == result.OUTCOME_FAILED
+    assert 'unexpected speech playback failure: player crashed' in result.message
+    assert diagnostics and diagnostics[0][0] == 1004
     assert not wav.exists()

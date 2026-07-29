@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> None:
             worker = None
             released = None
             if failure:
-                node.get_logger().error(f'push-to-talk capture failed: {failure[0]}')
+                node.report_provider_failure('audio_input', failure[0])
                 continue
             node.process_next_capture()
     except KeyboardInterrupt:

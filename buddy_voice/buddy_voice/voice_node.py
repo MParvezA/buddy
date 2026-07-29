@@ -124,6 +124,12 @@ class BuddyVoiceNode(Node):
             f'{self._last_error_message}')
         self._publish_diagnostic()
 
+    def report_provider_failure(self, source: str, error: Exception) -> None:
+        """Publish a structured local-provider failure outside the timer callback."""
+        if source not in {'audio_input', 'speech_to_text'}:
+            raise ValueError(f'unknown voice provider source: {source}')
+        self._record_provider_error(source, error)
+
     def _clear_provider_error(self) -> None:
         """Restore the readiness state after a complete successful capture."""
         self._audio_ready = True

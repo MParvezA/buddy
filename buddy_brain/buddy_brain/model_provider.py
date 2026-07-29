@@ -13,6 +13,7 @@ from pathlib import Path
 import selectors
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Protocol
@@ -20,6 +21,7 @@ from typing import Protocol
 
 MAX_STDOUT_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 16 * 1024
+MAX_OUTPUT_FILE_BYTES = 64 * 1024
 _CHILD_ENVIRONMENT = {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"}
 _RESPONSE_JSON_SCHEMA = json.dumps(
     {
@@ -247,16 +249,19 @@ def build_qwen_prompt(context_json: str) -> str:
     )
 
 
-def extract_one_json_object(output: str) -> str:
+def extract_one_json_object(output: str, *, allow_runtime_framing: bool = True) -> str:
     """Extract one complete JSON object from harmless CLI framing without repair."""
     start = output.find("{")
     if start < 0:
         raise ModelProviderError("llama.cpp output did not contain a JSON object")
     prefix = output[:start]
-    if prefix and not all(
-        line.startswith(("llama.cpp:", "main:", "system_info:"))
-        for line in prefix.splitlines()
-        if line
+    if prefix and (
+        not allow_runtime_framing
+        or not all(
+            line.startswith(("llama.cpp:", "main:", "system_info:"))
+            for line in prefix.splitlines()
+            if line
+        )
     ):
         raise ModelProviderError("llama.cpp output contained unexpected framing")
     depth = 0
@@ -296,6 +301,19 @@ def extract_one_json_object(output: str) -> str:
     raise ModelProviderError("llama.cpp output contained an incomplete JSON object")
 
 
+def extract_assistant_output(output_file_contents: str) -> str:
+    """Use only llama.cpp's final output-file assistant section as model output."""
+    if not output_file_contents.startswith("User:\n"):
+        raise ModelProviderError("llama.cpp output file had an unexpected header")
+    separator = "\nAssistant:\n"
+    if separator not in output_file_contents:
+        raise ModelProviderError("llama.cpp output file did not contain an assistant section")
+    _, assistant = output_file_contents.rsplit(separator, 1)
+    if not assistant:
+        raise ModelProviderError("llama.cpp output file had an empty assistant section")
+    return assistant
+
+
 class LlamaCppProvider:
     """Runs one owned local ``llama-cli`` child process for each completion."""
 
@@ -304,6 +322,7 @@ class LlamaCppProvider:
         self._request_lock = threading.Lock()
         self._process_lock = threading.Lock()
         self._current_process: subprocess.Popen[bytes] | None = None
+        self._current_output_file: Path | None = None
         self._shutting_down = False
         self._last_error = ""
         self._recovered = False
@@ -321,8 +340,11 @@ class LlamaCppProvider:
         with self._process_lock:
             self._shutting_down = True
             process = self._current_process
+            output_file = self._current_output_file
         if process is not None:
             self._terminate_owned_process(process)
+        if output_file is not None:
+            output_file.unlink(missing_ok=True)
 
     def complete(self, context_json: str) -> str:
         if not self._request_lock.acquire(blocking=False):
@@ -332,7 +354,9 @@ class LlamaCppProvider:
                 if self._shutting_down:
                     raise ModelProviderError("llama.cpp provider is shutting down")
             output = self._run_completion(build_qwen_prompt(context_json))
-            response = extract_one_json_object(output)
+            response = extract_one_json_object(
+                extract_assistant_output(output), allow_runtime_framing=False
+            )
             with self._process_lock:
                 self._recovered = bool(self._last_error)
                 self._last_error = ""
@@ -351,7 +375,7 @@ class LlamaCppProvider:
         finally:
             self._request_lock.release()
 
-    def _command(self, prompt: str) -> list[str]:
+    def _command(self, prompt: str, output_file: Path) -> list[str]:
         return [
             str(self._config.binary),
             "--model",
@@ -374,43 +398,77 @@ class LlamaCppProvider:
             "--log-disable",
             "--no-show-timings",
             "--no-conversation",
+            "--single-turn",
             "--no-jinja",
             "--no-warmup",
             "--no-display-prompt",
+            "--output-file",
+            str(output_file),
             "--prompt",
             prompt,
         ]
 
     def _run_completion(self, prompt: str) -> str:
-        process = subprocess.Popen(
-            self._command(prompt),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_CHILD_ENVIRONMENT,
-            start_new_session=True,
-        )
-        with self._process_lock:
-            if self._shutting_down:
-                self._terminate_owned_process(process)
-                raise ModelProviderError("llama.cpp provider is shutting down")
-            self._current_process = process
+        output_file = self._create_output_file()
+        process: subprocess.Popen[bytes] | None = None
         try:
-            stdout, stderr = self._read_bounded_output(process)
-            if process.returncode != 0:
-                del stderr
-                raise ModelProviderError(f"llama.cpp exited with code {process.returncode}")
-            return stdout.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as error:
-            raise ModelProviderError("llama.cpp output was not UTF-8") from error
-        finally:
             with self._process_lock:
-                if self._current_process is process:
-                    self._current_process = None
-            self._terminate_owned_process(process)
-            for stream in (process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
+                if self._shutting_down:
+                    raise ModelProviderError("llama.cpp provider is shutting down")
+                process = subprocess.Popen(
+                    self._command(prompt, output_file),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=_CHILD_ENVIRONMENT,
+                    start_new_session=True,
+                )
+                self._current_process = process
+                self._current_output_file = output_file
+            stdout, stderr = self._read_bounded_output(process)
+            del stdout, stderr
+            if process.returncode != 0:
+                raise ModelProviderError(f"llama.cpp exited with code {process.returncode}")
+            return self._read_output_file(output_file)
+        finally:
+            if process is not None:
+                with self._process_lock:
+                    if self._current_process is process:
+                        self._current_process = None
+                    if self._current_output_file == output_file:
+                        self._current_output_file = None
+                self._terminate_owned_process(process)
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+            output_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def _create_output_file() -> Path:
+        descriptor, name = tempfile.mkstemp(prefix="buddy_llama_", suffix=".out", dir="/tmp")
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        return Path(name)
+
+    @staticmethod
+    def _read_output_file(output_file: Path) -> str:
+        try:
+            if output_file.stat().st_size > MAX_OUTPUT_FILE_BYTES:
+                raise ModelProviderError(
+                    "llama.cpp output file exceeded its bounded capture limit"
+                )
+            with output_file.open("rb") as stream:
+                contents = stream.read(MAX_OUTPUT_FILE_BYTES + 1)
+        except OSError as error:
+            raise ModelProviderError("llama.cpp output file could not be read") from error
+        if len(contents) > MAX_OUTPUT_FILE_BYTES:
+            raise ModelProviderError("llama.cpp output file exceeded its bounded capture limit")
+        try:
+            return contents.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise ModelProviderError("llama.cpp output file was not UTF-8") from error
 
     def _read_bounded_output(self, process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
         assert process.stdout is not None

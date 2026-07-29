@@ -222,18 +222,43 @@ def _output_text(output: bytearray, truncated: bool) -> str:
     return output.decode(errors='replace') + suffix
 
 
-def _validate_wav(path: Path) -> float:
-    """Reject non-PCM, non-16kHz, non-mono captures and report duration."""
+def _pcm_wav_properties(path: Path) -> tuple[int, int, int, int, str]:
+    """Return frames/rate/channels/sample width for a readable non-empty PCM WAV."""
     try:
         with wave.open(str(path), 'rb') as reader:
-            if (reader.getsampwidth(), reader.getframerate(), reader.getnchannels()) != (2, 16000, 1):
-                raise CaptureError('PipeWire capture must be 16-bit PCM WAV at 16 kHz mono')
-            frames = reader.getnframes()
+            properties = (
+                reader.getnframes(),
+                reader.getframerate(),
+                reader.getnchannels(),
+                reader.getsampwidth(),
+                reader.getcomptype(),
+            )
     except (wave.Error, OSError) as error:
-        raise CaptureError(f'PipeWire capture is not a readable WAV: {error}') from error
-    if frames <= 0:
-        raise CaptureError('PipeWire capture produced no audio frames')
-    return frames / 16000.0
+        raise ValueError(f'not a readable WAV: {error}') from error
+    frames, rate, channels, sample_width, compression = properties
+    if compression != 'NONE' or not all(value > 0 for value in properties[:4]):
+        raise ValueError('must be a non-empty PCM WAV with positive audio properties')
+    return properties
+
+
+def _validate_capture_wav(path: Path) -> float:
+    """Require PipeWire microphone capture to be 16-bit PCM, 16 kHz, mono."""
+    try:
+        frames, rate, channels, sample_width, _compression = _pcm_wav_properties(path)
+    except ValueError as error:
+        raise CaptureError(f'PipeWire capture {error}') from error
+    if (sample_width, rate, channels) != (2, 16000, 1):
+        raise CaptureError('PipeWire capture must be 16-bit PCM WAV at 16 kHz mono')
+    return frames / rate
+
+
+def _validate_piper_wav(path: Path) -> float:
+    """Accept Piper's native PCM WAV rate/channels and report its true duration."""
+    try:
+        frames, rate, _channels, _sample_width, _compression = _pcm_wav_properties(path)
+    except ValueError as error:
+        raise SpeechSynthesisError(f'Piper output {error}') from error
+    return frames / rate
 
 
 class PipeWirePushToTalkAudioInput:
@@ -289,7 +314,7 @@ class PipeWirePushToTalkAudioInput:
             _, stderr = _finish(process)
             if not audio_path.exists():
                 raise CaptureError(f'PipeWire capture produced no WAV: {stderr.strip()}')
-            _validate_wav(audio_path)
+            _validate_capture_wav(audio_path)
         except Exception:
             audio_path.unlink(missing_ok=True)
             raise
@@ -483,7 +508,7 @@ class PiperTextToSpeechProvider:
             if process.process.returncode != 0:
                 raise SpeechSynthesisError(
                     f'Piper exited with {process.process.returncode}: {stderr.strip()}')
-            duration = _validate_wav(wav_path)
+            duration = _validate_piper_wav(wav_path)
             return SynthesizedSpeech(duration, wav_path)
         except (SpeechSynthesisCancelled, SpeechSynthesisTimeout, SpeechSynthesisError):
             wav_path.unlink(missing_ok=True)

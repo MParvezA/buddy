@@ -208,10 +208,11 @@ def test_whisper_timeout_terminates_child_and_discards_recording(tmp_path: Path)
 def test_piper_selects_locale_and_cancels_playback_with_cleanup(tmp_path: Path) -> None:
     """Synthesis and actual PipeWire playback are separate cancellable phases."""
     piper = _script(tmp_path / 'piper', """
-import sys, wave
+import json, sys, wave
 path = sys.argv[sys.argv.index('--output_file') + 1]
+open(path + '.argv', 'w').write(json.dumps(sys.argv[1:]))
 with wave.open(path, 'wb') as output:
-    output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
+    output.setnchannels(1); output.setsampwidth(2); output.setframerate(22050)
     output.writeframes(b'\\0\\0' * 320)
 """)
     player = _script(tmp_path / 'pw-play', """
@@ -228,6 +229,11 @@ while True: time.sleep(0.01)
     speech = provider.synthesize('Danke, das ist gut.', '', cancel_event=Event(),
                                  deadline_monotonic=time.monotonic() + 1.0)
     assert speech.audio_path is not None and speech.audio_path.exists()
+    assert speech.duration_seconds == pytest.approx(320 / 22050)
+    piper_args = json.loads((Path(str(speech.audio_path) + '.argv')).read_text())
+    assert piper_args[piper_args.index('--model') + 1] == str(de_model)
+    assert piper_args[piper_args.index('--config') + 1] == str(de_config)
+    assert piper_args[piper_args.index('--output_file') + 1] == str(speech.audio_path)
     cancelled = Event()
     Thread(target=lambda: (time.sleep(0.05), cancelled.set())).start()
     with pytest.raises(SpeechPlaybackCancelled):

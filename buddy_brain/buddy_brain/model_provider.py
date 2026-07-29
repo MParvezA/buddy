@@ -374,7 +374,6 @@ class LlamaCppProvider:
             "--log-disable",
             "--no-show-timings",
             "--no-conversation",
-            "--single-turn",
             "--no-jinja",
             "--no-warmup",
             "--no-display-prompt",

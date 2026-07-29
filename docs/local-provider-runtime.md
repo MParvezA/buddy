@@ -10,6 +10,10 @@
 - Languages: English and German
 - Wake phrase: `Buddy` or `Hey Buddy`
 
+The wake phrase is the target interaction, not a claim that continuous
+wake-word listening is complete. The first real provider slice uses terminal
+push-to-talk; see `docs/local-provider-setup.md`.
+
 This profile defines implementation and launch configuration below the frozen
 ROS boundary. It does not grant the voice or model layers any additional robot
 authority.
@@ -165,3 +169,16 @@ safety or motion stack.
 9. An optional live smoke test reports unavailable dependencies as a clear
    skip or diagnostic, never as success.
 
+## First live evidence
+
+The initial local smoke on the development PC established:
+
+- Qwen3 1.7B Q4_K_M loaded CPU-only with three threads;
+- measured model-provider peak RSS was approximately 2.4 GiB;
+- English Piper synthesis produced a valid mono 22.05 kHz PCM WAV;
+- the WH-CH520 mSBC headset profile exposed a PipeWire source and sink;
+- bounded WH-CH520 capture reached multilingual Whisper;
+- a silent sample produced Whisper's `[BLANK_AUDIO]` sentinel, which is now
+  rejected as no utterance rather than published to dialogue;
+- microphone WAVs, Whisper JSON, Piper WAVs, and llama output files are
+  provider-owned temporary files and are deleted after use.

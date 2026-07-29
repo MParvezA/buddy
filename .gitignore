@@ -1,6 +1,7 @@
 build/
 install/
 log/
+runtime_assets/
 
 __pycache__/
 *.py[cod]
@@ -11,4 +12,3 @@ __pycache__/
 .vscode/
 *.swp
 *~
-

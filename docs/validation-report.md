@@ -254,15 +254,14 @@ The deliberate limitations in
   `base_link`; TF publication and simulation dynamics are unaffected, but a
   future description cleanup can introduce a massless parser root.
 
-## Recommended next vertical slice
+## Local-provider follow-up
 
-Connect the local audio/model providers without increasing robot authority:
+The CPU-only push-to-talk, whisper.cpp, llama.cpp, and Piper slice was
+implemented after this contract-frozen baseline. Its build, live-provider,
+resource, integration, and safety evidence is recorded in
+[the local-provider validation report](local-provider-validation.md).
 
-1. Desktop push-to-talk and microphone capture.
-2. whisper.cpp speech-to-text.
-3. llama.cpp structured proposal generation constrained to the frozen schema.
-4. Piper synthesis and playback.
-5. Provider contract tests plus a repeatable small-world Nav2 arrival scenario.
-
-Keep the movement path, safety semantics, and capability-validation boundary
-unchanged.
+The next vertical slice is continuous local wake-word detection, audio ducking,
+and a repeatable English/German test under an enforced 8 GB/four-core resource
+limit. It must keep the movement path, safety semantics, and
+capability-validation boundary unchanged.

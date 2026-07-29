@@ -90,11 +90,20 @@ diagnostics, including the private velocity-gate state.
 
 ## Deliberate limitations
 
-- Production adapters for openWakeWord, whisper.cpp, llama.cpp, and Piper are
-  not selected or installed yet. Deterministic local fakes exercise the same
-  boundaries without cloud APIs.
-- Push-to-talk has a software provider boundary but no desktop button or
-  microphone device adapter yet.
+- Concrete PipeWire, whisper.cpp, llama.cpp, and Piper adapters are implemented.
+  Their large runtime binaries and models remain operator-installed assets;
+  deterministic local fakes remain the launch defaults for CI and simulation.
+- Terminal push-to-talk is implemented for the WH-CH520 development headset.
+  Continuous `Buddy` wake-word listening and a desktop button are not yet
+  implemented.
+- The configured provider bounds target four CPU cores and 8 GB RAM, but the
+  development host has more physical memory. The measured model-provider peak
+  RSS is about 2.4 GiB; an 8 GB cgroup or target-computer soak test is still
+  required before claiming the complete stack is proven under that limit.
+- A bounded live WH-CH520 capture reached multilingual Whisper and correctly
+  rejected its no-speech sentinel. A successful interactive English and German
+  spoken-transcript demonstration still requires the operator to use the
+  terminal push-to-talk flow.
 - Named locations come from a static YAML file. There is no teach-location UI.
 - Initial perception reports sensor readiness and summarized pose/location. The
   frozen round has no observation-ingress topic, so object observations are not
@@ -120,16 +129,17 @@ diagnostics, including the private velocity-gate state.
 
 ## Recommended next vertical slice
 
-Connect one end-to-end local voice path without expanding robot authority:
+Complete the local voice experience without expanding robot authority:
 
-1. Add a desktop push-to-talk microphone provider.
-2. Add a whisper.cpp STT adapter.
-3. Add a llama.cpp completion adapter that can return only the frozen JSON
-   proposal schema.
-4. Add Piper synthesis/playback.
-5. Keep deterministic fakes for CI and add provider contract tests.
-6. Demonstrate only `speak`, `report_status`, and confirmed `navigate_to` in the
-   existing Gazebo world.
+1. Add a tested local continuous wake-word detector for `Buddy` / `Hey Buddy`.
+2. Add playback ducking or echo cancellation so Buddy does not transcribe its
+   own speech.
+3. Run a sustained English/German voice test under a real 8 GB, four-core
+   resource limit.
+4. Improve clarification quality for the small local model while retaining
+   strict schema validation.
+5. Add a repeatable named-location world where a confirmed voice command
+   reaches a terminal navigation result.
 
 This slice should not change movement topics, controller access, safety
 semantics, or capability validation.

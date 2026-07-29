@@ -17,16 +17,27 @@ from test.test_dialogue_node import (
     test_dialogue_health_waits_for_capabilities_and_action_servers,
     test_execute_result_requires_consistent_ros_and_custom_success,
     test_execute_result_true_success_and_transport_exception_are_deterministic,
+    test_final_utterance_locale_selects_german_or_english_speak_voice,
     test_invalid_execute_goal_handle_is_structured_failure,
     test_node_construction_capability_refresh_confirmed_dispatch_and_motion_boundary,
     test_speech_action_rejection_and_terminal_outcomes_are_observed_without_recursion,
     test_speech_submission_and_result_transport_failures_are_diagnostic,
+    test_provider_failure_publishes_diagnostic_and_never_dispatches_a_task,
+    test_missing_explicit_provider_is_unready_and_never_dispatches_a_task,
 )
 from test.test_main_teardown import (
     test_entrypoint_static_shape_has_narrow_shutdown_handling,
     test_external_shutdown_does_not_request_a_second_shutdown,
     test_keyboard_interrupt_destroys_node_then_shuts_down_live_context,
     test_ordinary_runtime_exception_is_not_swallowed,
+)
+from test.test_llama_cpp_provider import (
+    test_llama_cpp_config_requires_explicit_resources_and_profile_bounds,
+    test_llama_cpp_crash_timeout_and_malformed_output_fail_closed_without_a_plan,
+    test_llama_cpp_shutdown_terminates_an_owned_child_process,
+    test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object,
+    test_llama_cpp_reports_recovery_after_a_later_valid_completion,
+    test_qwen_prompt_and_extraction_do_not_repair_schema_invalid_content,
 )
 
 
@@ -63,6 +74,15 @@ def load_tests(loader, tests, pattern):
                 test_speech_submission_and_result_transport_failures_are_diagnostic
             ),
             unittest.FunctionTestCase(
+                test_final_utterance_locale_selects_german_or_english_speak_voice
+            ),
+            unittest.FunctionTestCase(
+                test_provider_failure_publishes_diagnostic_and_never_dispatches_a_task
+            ),
+            unittest.FunctionTestCase(
+                test_missing_explicit_provider_is_unready_and_never_dispatches_a_task
+            ),
+            unittest.FunctionTestCase(
                 test_keyboard_interrupt_destroys_node_then_shuts_down_live_context
             ),
             unittest.FunctionTestCase(
@@ -71,6 +91,22 @@ def load_tests(loader, tests, pattern):
             unittest.FunctionTestCase(test_ordinary_runtime_exception_is_not_swallowed),
             unittest.FunctionTestCase(
                 test_entrypoint_static_shape_has_narrow_shutdown_handling
+            ),
+            unittest.FunctionTestCase(
+                test_llama_cpp_config_requires_explicit_resources_and_profile_bounds
+            ),
+            unittest.FunctionTestCase(
+                test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object
+            ),
+            unittest.FunctionTestCase(
+                test_qwen_prompt_and_extraction_do_not_repair_schema_invalid_content
+            ),
+            unittest.FunctionTestCase(
+                test_llama_cpp_crash_timeout_and_malformed_output_fail_closed_without_a_plan
+            ),
+            unittest.FunctionTestCase(test_llama_cpp_shutdown_terminates_an_owned_child_process),
+            unittest.FunctionTestCase(
+                test_llama_cpp_reports_recovery_after_a_later_valid_completion
             ),
         ]
     )

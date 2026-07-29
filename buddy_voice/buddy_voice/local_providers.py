@@ -10,7 +10,9 @@ from pathlib import Path
 import select
 import shutil
 import signal
+import stat
 import subprocess
+import tempfile
 from threading import Event, Thread
 import time
 from typing import Callable, Sequence
@@ -41,6 +43,15 @@ MIN_TTS_PLAYBACK_TIMEOUT_SECONDS = 1
 MAX_TTS_PLAYBACK_TIMEOUT_SECONDS = 60
 SUPPORTED_STT_LANGUAGES = {'auto', 'en', 'de'}
 MAX_CHILD_OUTPUT_BYTES = 64 * 1024
+MAX_WHISPER_JSON_BYTES = 1 * 1024 * 1024
+MAX_CAPTURE_WAV_BYTES = MAX_CAPTURE_SECONDS * 16000 * 2 + 4096
+MAX_PIPER_WAV_BYTES = 8 * 1024 * 1024
+CHILD_ENVIRONMENT_KEYS = (
+    'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'XDG_RUNTIME_DIR',
+    'DBUS_SESSION_BUS_ADDRESS', 'PIPEWIRE_RUNTIME_DIR', 'PIPEWIRE_REMOTE',
+    'PIPEWIRE_LATENCY', 'PIPEWIRE_CONFIG_DIR', 'PIPEWIRE_CONFIG_PREFIX',
+    'PIPEWIRE_MODULE_DIR', 'SPA_PLUGIN_DIR', 'LD_LIBRARY_PATH',
+)
 
 
 class LocalProviderError(RuntimeError):
@@ -128,6 +139,64 @@ def _asset(value: str | Path, label: str) -> Path:
     return path
 
 
+def _private_directory(base: Path | None, prefix: str) -> Path:
+    """Create a provider-owned, mode-0700 directory for one local process."""
+    parent = base or Path('/tmp')
+    parent.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+    directory.chmod(0o700)
+    return directory
+
+
+def _remove_owned_directory(directory: Path | None) -> None:
+    """Remove one known provider-owned private directory and all its outputs."""
+    if directory is not None:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _open_bounded_regular_file(path: Path, maximum_bytes: int, label: str):
+    """Open a non-symlink regular file after enforcing a strict byte bound."""
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(f'{label} is unavailable or unsafe: {error}') from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f'{label} must be a regular file')
+        if metadata.st_size > maximum_bytes:
+            raise ValueError(f'{label} exceeds {maximum_bytes} bytes')
+        return os.fdopen(descriptor, 'rb')
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_bounded_json(path: Path) -> object:
+    """Read a bounded private whisper JSON file without following symlinks."""
+    try:
+        with _open_bounded_regular_file(path, MAX_WHISPER_JSON_BYTES, 'whisper JSON') as source:
+            payload = source.read(MAX_WHISPER_JSON_BYTES + 1)
+    except (OSError, ValueError) as error:
+        raise SttError(f'whisper.cpp produced unsafe JSON: {error}') from error
+    if len(payload) > MAX_WHISPER_JSON_BYTES:
+        raise SttError('whisper.cpp JSON exceeds maximum size')
+    try:
+        return json.loads(payload.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SttError(f'whisper.cpp produced invalid JSON: {error}') from error
+
+
+def _child_environment() -> dict[str, str]:
+    """Return only local runtime variables needed by PipeWire and native binaries."""
+    return {
+        key: os.environ[key]
+        for key in CHILD_ENVIRONMENT_KEYS
+        if key in os.environ
+    }
+
+
 @dataclass
 class _ChildProcess:
     """An owned child with concurrently drained, bounded diagnostic output."""
@@ -138,6 +207,8 @@ class _ChildProcess:
     stdout_truncated: list[bool]
     stderr_truncated: list[bool]
     drains: tuple[Thread, Thread]
+    process_group_id: int
+    session_id: int
 
     def poll(self) -> int | None:
         """Return the underlying child status without exposing its process API."""
@@ -157,39 +228,68 @@ def _drain(stream: object, output: bytearray, truncated: list[bool]) -> None:
             truncated[0] = True
 
 
+def _owned_group_alive(child: _ChildProcess) -> bool:
+    """Confirm an owned Linux process group remains before signalling its PGID."""
+    if child.process.poll() is None:
+        return True
+    proc_root = Path('/proc')
+    if not proc_root.is_dir():
+        return False
+    for entry in proc_root.iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            remainder = (entry / 'stat').read_text(encoding='utf-8').rsplit(')', 1)[1].split()
+            process_group_id, session_id = int(remainder[2]), int(remainder[3])
+        except (IndexError, OSError, ValueError):
+            continue
+        if (process_group_id, session_id) == (child.process_group_id, child.session_id):
+            return True
+    return False
+
+
+def _wait_for_owned_group(child: _ChildProcess, timeout_seconds: float) -> bool:
+    """Wait only for the recorded provider group, never a reused arbitrary PGID."""
+    deadline = time.monotonic() + timeout_seconds
+    while _owned_group_alive(child):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
 def _terminate(child: _ChildProcess, *, first_signal: int = signal.SIGTERM) -> None:
     """Stop an owned group with the requested graceful signal, TERM, then KILL."""
-    process = child.process
-    if process.poll() is not None:
+    if not _owned_group_alive(child):
         return
     try:
-        os.killpg(os.getpgid(process.pid), first_signal)
+        os.killpg(child.process_group_id, first_signal)
     except ProcessLookupError:
         return
-    try:
-        process.wait(timeout=0.25)
-    except subprocess.TimeoutExpired:
-        if first_signal != signal.SIGTERM:
+    if not _wait_for_owned_group(child, 0.25):
+        if first_signal != signal.SIGTERM and _owned_group_alive(child):
             try:
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                os.killpg(child.process_group_id, signal.SIGTERM)
             except ProcessLookupError:
                 return
+        if not _wait_for_owned_group(child, 0.25) and _owned_group_alive(child):
+            try:
+                os.killpg(child.process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            _wait_for_owned_group(child, 0.25)
+    if child.process.poll() is None:
         try:
-            process.wait(timeout=0.25)
-        except ProcessLookupError:
-            return
+            child.process.wait(timeout=0.25)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                return
-            process.wait(timeout=0.25)
+            pass
 
 
 def _start(argv: list[str], *, stdin: bool = False) -> _ChildProcess:
     """Start an argv-only child while draining bounded stdout/stderr concurrently."""
     process = subprocess.Popen(
         argv,
+        env=_child_environment(),
         stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -204,7 +304,9 @@ def _start(argv: list[str], *, stdin: bool = False) -> _ChildProcess:
     )
     for drain in drains:
         drain.start()
-    return _ChildProcess(process, stdout, stderr, stdout_truncated, stderr_truncated, drains)
+    return _ChildProcess(
+        process, stdout, stderr, stdout_truncated, stderr_truncated, drains,
+        process.pid, process.pid)
 
 
 def _finish(child: _ChildProcess) -> tuple[str, str]:
@@ -272,18 +374,20 @@ def _deliver_piper_stdin(
             pass
 
 
-def _pcm_wav_properties(path: Path) -> tuple[int, int, int, int, str]:
+def _pcm_wav_properties(
+        path: Path, maximum_bytes: int, label: str) -> tuple[int, int, int, int, str]:
     """Return frames/rate/channels/sample width for a readable non-empty PCM WAV."""
     try:
-        with wave.open(str(path), 'rb') as reader:
-            properties = (
-                reader.getnframes(),
-                reader.getframerate(),
-                reader.getnchannels(),
-                reader.getsampwidth(),
-                reader.getcomptype(),
-            )
-    except (wave.Error, OSError) as error:
+        with _open_bounded_regular_file(path, maximum_bytes, label) as source:
+            with wave.open(source, 'rb') as reader:
+                properties = (
+                    reader.getnframes(),
+                    reader.getframerate(),
+                    reader.getnchannels(),
+                    reader.getsampwidth(),
+                    reader.getcomptype(),
+                )
+    except (wave.Error, OSError, ValueError) as error:
         raise ValueError(f'not a readable WAV: {error}') from error
     frames, rate, channels, sample_width, compression = properties
     if compression != 'NONE' or not all(value > 0 for value in properties[:4]):
@@ -294,7 +398,8 @@ def _pcm_wav_properties(path: Path) -> tuple[int, int, int, int, str]:
 def _validate_capture_wav(path: Path) -> float:
     """Require PipeWire microphone capture to be 16-bit PCM, 16 kHz, mono."""
     try:
-        frames, rate, channels, sample_width, _compression = _pcm_wav_properties(path)
+        frames, rate, channels, sample_width, _compression = _pcm_wav_properties(
+            path, MAX_CAPTURE_WAV_BYTES, 'PipeWire capture WAV')
     except ValueError as error:
         raise CaptureError(f'PipeWire capture {error}') from error
     if (sample_width, rate, channels) != (2, 16000, 1):
@@ -305,7 +410,8 @@ def _validate_capture_wav(path: Path) -> float:
 def _validate_piper_wav(path: Path) -> float:
     """Accept Piper's native PCM WAV rate/channels and report its true duration."""
     try:
-        frames, rate, _channels, _sample_width, _compression = _pcm_wav_properties(path)
+        frames, rate, _channels, _sample_width, _compression = _pcm_wav_properties(
+            path, MAX_PIPER_WAV_BYTES, 'Piper output WAV')
     except ValueError as error:
         raise SpeechSynthesisError(f'Piper output {error}') from error
     return frames / rate
@@ -326,7 +432,7 @@ class PipeWirePushToTalkAudioInput:
         self._device = device or None
         self._maximum_capture_seconds = validate_capture_seconds(maximum_capture_seconds)
         self._locale = locale
-        self._temp_directory = Path(temp_directory).resolve() if temp_directory else None
+        self._temp_directory = Path(temp_directory) if temp_directory else None
         self._captures: deque[AudioCapture] = deque()
 
     def next_capture(self) -> AudioCapture | None:
@@ -339,12 +445,12 @@ class PipeWirePushToTalkAudioInput:
             capture = self._captures.popleft()
             if capture.audio_path is not None:
                 capture.audio_path.unlink(missing_ok=True)
+            _remove_owned_directory(capture.cleanup_directory)
 
     def capture_once(self, release_event: Event) -> AudioCapture:
         """Record until release or the configured maximum, then queue one WAV."""
-        directory = self._temp_directory or Path('/tmp')
-        directory.mkdir(parents=True, exist_ok=True)
-        audio_path = directory / f'buddy-ptt-{os.getpid()}-{time.monotonic_ns()}.wav'
+        directory = _private_directory(self._temp_directory, 'buddy-capture-')
+        audio_path = directory / 'capture.wav'
         # pw-record/pw-play are commonly symlinks to pw-cat. Always request the
         # operation explicitly because executable resolution intentionally
         # yields the pw-cat target rather than the wrapper basename.
@@ -358,6 +464,7 @@ class PipeWirePushToTalkAudioInput:
         try:
             process = _start(argv)
         except OSError as error:
+            _remove_owned_directory(directory)
             raise CaptureError(f'PipeWire capture could not start: {error}') from error
         deadline = time.monotonic() + self._maximum_capture_seconds
         try:
@@ -372,9 +479,11 @@ class PipeWirePushToTalkAudioInput:
                 raise CaptureError(f'PipeWire capture produced no WAV: {stderr.strip()}')
             _validate_capture_wav(audio_path)
         except Exception:
-            audio_path.unlink(missing_ok=True)
+            if process.poll() is None:
+                _terminate(process)
+            _remove_owned_directory(directory)
             raise
-        capture = AudioCapture(b'', 0, self._locale, audio_path)
+        capture = AudioCapture(b'', 0, self._locale, audio_path, directory)
         self._captures.append(capture)
         return capture
 
@@ -443,7 +552,8 @@ class WhisperCppSpeechToTextProvider:
         if capture.audio_path is None:
             raise SttError('whisper.cpp requires a local WAV capture path')
         audio_path = capture.audio_path
-        output_base = audio_path.with_suffix('')
+        output_directory = _private_directory(None, 'buddy-whisper-')
+        output_base = output_directory / 'output'
         output_json = output_base.with_suffix('.json')
         argv = [self._binary, '-m', str(self._model), '-f', str(audio_path), '-t', str(self._threads),
                 '-l', self._language, '-oj', '-of', str(output_base)]
@@ -460,10 +570,7 @@ class WhisperCppSpeechToTextProvider:
             if process.process.returncode != 0:
                 raise SttError(
                     f'whisper.cpp exited with {process.process.returncode}: {stderr.strip()}')
-            try:
-                payload = json.loads(output_json.read_text(encoding='utf-8'))
-            except (OSError, json.JSONDecodeError) as error:
-                raise SttError(f'whisper.cpp produced invalid JSON: {error}') from error
+            payload = _read_bounded_json(output_json)
             text = _transcript_from_json(payload, capture.locale)
             if not text:
                 raise SttError('whisper.cpp produced an empty final transcript')
@@ -481,7 +588,8 @@ class WhisperCppSpeechToTextProvider:
             if process is not None:
                 _finish(process)
             audio_path.unlink(missing_ok=True)
-            output_json.unlink(missing_ok=True)
+            _remove_owned_directory(capture.cleanup_directory)
+            _remove_owned_directory(output_directory)
 
 
 @dataclass(frozen=True)
@@ -533,7 +641,7 @@ class PiperTextToSpeechProvider:
         self._sink = sink or None
         self._synthesis_timeout_seconds = validate_tts_synthesis_timeout_seconds(synthesis_timeout_seconds)
         self._playback_timeout_seconds = validate_tts_playback_timeout_seconds(playback_timeout_seconds)
-        self._temp_directory = Path(temp_directory).resolve() if temp_directory else None
+        self._temp_directory = Path(temp_directory) if temp_directory else None
 
     def _select_voice(self, text: str, requested: str) -> PiperVoice:
         if requested:
@@ -547,9 +655,8 @@ class PiperTextToSpeechProvider:
             deadline_monotonic: float) -> SynthesizedSpeech:
         """Synthesize a temporary WAV, without starting playback."""
         selected = self._select_voice(text, voice)
-        directory = self._temp_directory or Path('/tmp')
-        directory.mkdir(parents=True, exist_ok=True)
-        wav_path = directory / f'buddy-piper-{os.getpid()}-{time.monotonic_ns()}.wav'
+        directory = _private_directory(self._temp_directory, 'buddy-piper-')
+        wav_path = directory / 'output.wav'
         argv = [self._piper_binary, '--model', str(selected.model), '--config', str(selected.config),
                 '--output_file', str(wav_path)]
         process: _ChildProcess | None = None
@@ -575,16 +682,16 @@ class PiperTextToSpeechProvider:
                 raise SpeechSynthesisError(
                     f'Piper exited with {process.process.returncode}: {stderr.strip()}')
             duration = _validate_piper_wav(wav_path)
-            return SynthesizedSpeech(duration, wav_path)
+            return SynthesizedSpeech(duration, wav_path, directory)
         except (SpeechSynthesisCancelled, SpeechSynthesisTimeout, SpeechSynthesisError):
             if process is not None and process.poll() is None:
                 _terminate(process)
-            wav_path.unlink(missing_ok=True)
+            _remove_owned_directory(directory)
             raise
         except Exception as error:
             if process is not None and process.poll() is None:
                 _terminate(process)
-            wav_path.unlink(missing_ok=True)
+            _remove_owned_directory(directory)
             raise SpeechSynthesisError(f'Piper synthesis failed: {error}') from error
         finally:
             if process is not None and process.poll() is None:
@@ -627,6 +734,7 @@ class PiperTextToSpeechProvider:
         """Delete the provider-owned WAV after every terminal action outcome."""
         if speech.audio_path is not None:
             speech.audio_path.unlink(missing_ok=True)
+        _remove_owned_directory(speech.cleanup_directory)
 
 
 class OptionalWakeWordProvider:

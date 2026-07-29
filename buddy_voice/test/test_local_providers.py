@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import stat
 from threading import Event, Thread
 import time
 
 from buddy_voice.local_providers import (
+    _finish,
     _is_no_speech_sentinel,
+    _start,
+    _terminate,
     LocalProviderError,
     OptionalWakeWordProvider,
     PiperTextToSpeechProvider,
@@ -119,13 +124,75 @@ while True: time.sleep(0.01)
     assert Path(str(capture.audio_path) + '.signals').read_text() == 'INT TERM'
 
 
+def test_capture_uses_private_directory_and_does_not_touch_preexisting_output(
+        tmp_path: Path) -> None:
+    """A preexisting output-looking symlink is never selected for PipeWire capture."""
+    victim = _asset(tmp_path / 'victim.wav')
+    (tmp_path / 'capture.wav').symlink_to(victim)
+    recorder = _script(tmp_path / 'pw-record', """
+import signal, sys, time, wave
+path = sys.argv[-1]
+def stop(*_):
+    with wave.open(path, 'wb') as output:
+        output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
+        output.writeframes(b'\\0\\0' * 16)
+    raise SystemExit(0)
+signal.signal(signal.SIGINT, stop)
+while True: time.sleep(0.01)
+""")
+    source = PipeWirePushToTalkAudioInput(
+        record_binary=recorder, maximum_capture_seconds=1, temp_directory=tmp_path)
+    released = Event()
+    result = []
+    worker = Thread(target=lambda: result.append(source.capture_once(released)))
+    worker.start()
+    time.sleep(0.05)
+    released.set()
+    worker.join()
+    capture = result[0]
+    assert capture.audio_path is not None
+    assert capture.audio_path.parent != tmp_path
+    assert stat.S_IMODE(capture.audio_path.parent.stat().st_mode) == 0o700
+    assert victim.read_text() == 'local test asset'
+    private_directory = capture.audio_path.parent
+    source.close()
+    assert not private_directory.exists()
+
+
+def test_capture_rejects_oversized_wav_and_removes_private_directory(tmp_path: Path) -> None:
+    """Capture size is bounded before WAV parsing and its private directory is removed."""
+    recorder = _script(tmp_path / 'pw-record', """
+import sys
+open(sys.argv[-1], 'wb').truncate(2 * 1024 * 1024)
+""")
+    source = PipeWirePushToTalkAudioInput(
+        record_binary=recorder, maximum_capture_seconds=1, temp_directory=tmp_path)
+    released = Event()
+    failure = []
+
+    def capture() -> None:
+        try:
+            source.capture_once(released)
+        except Exception as error:
+            failure.append(error)
+
+    worker = Thread(target=capture)
+    worker.start()
+    time.sleep(0.05)
+    released.set()
+    worker.join()
+    assert failure and 'exceeds' in str(failure[0])
+    assert not list(tmp_path.glob('buddy-capture-*'))
+
+
 def test_whisper_parses_json_and_discards_recording(tmp_path: Path) -> None:
     """whisper-cli receives an argv model/input/thread/language configuration."""
     whisper = _script(tmp_path / 'whisper-cli', """
 import json, pathlib, sys
 base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
 base.with_suffix('.json').write_text(json.dumps({'transcription': [{'text': ' Hallo Buddy '}] }))
-base.with_suffix('.argv').write_text(json.dumps(sys.argv[1:]))
+pathlib.Path(sys.argv[sys.argv.index('-m') + 1]).parent.joinpath('whisper.argv').write_text(
+    json.dumps(sys.argv[1:]))
 """)
     model = _asset(tmp_path / 'ggml-base.bin')
     audio = tmp_path / 'input.wav'
@@ -142,7 +209,7 @@ base.with_suffix('.argv').write_text(json.dumps(sys.argv[1:]))
     assert transcripts[0].locale == 'de-DE'
     assert not audio.exists()
     assert not list(tmp_path.glob('input.json'))
-    whisper_args = json.loads((tmp_path / 'input.argv').read_text())
+    whisper_args = json.loads((tmp_path / 'whisper.argv').read_text())
     assert whisper_args[whisper_args.index('-t') + 1] == '2'
     assert whisper_args[whisper_args.index('-l') + 1] == 'de'
 
@@ -169,6 +236,24 @@ base.with_suffix('.json').write_text(json.dumps({{
     assert transcript.locale == expected_locale
 
 
+def test_whisper_removes_owned_capture_directory_after_handoff(tmp_path: Path) -> None:
+    """STT owns the final cleanup of a private capture directory handed off by PTT."""
+    whisper = _script(tmp_path / 'whisper-cli', """
+import json, pathlib, sys
+base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
+base.with_suffix('.json').write_text(json.dumps({'text': 'hello'}))
+""")
+    model = _asset(tmp_path / 'ggml-base.bin')
+    capture_directory = tmp_path / 'buddy-capture-handoff'
+    capture_directory.mkdir(mode=0o700)
+    audio = _asset(capture_directory / 'capture.wav')
+    from buddy_voice.providers import AudioCapture
+    transcript = WhisperCppSpeechToTextProvider(binary=whisper, model=model).transcribe(
+        AudioCapture(b'', 0, 'en-US', audio, capture_directory))[0]
+    assert transcript.text == 'hello'
+    assert not capture_directory.exists()
+
+
 def test_noisy_whisper_child_is_drained_and_diagnostic_output_is_bounded(tmp_path: Path) -> None:
     """A noisy local child neither blocks the poll loop nor grows retained output."""
     whisper = _script(tmp_path / 'whisper-cli', """
@@ -188,13 +273,29 @@ sys.exit(7)
     assert len(str(error.value)) < 70 * 1024
 
 
+def test_whisper_rejects_oversized_private_json_and_cleans_capture(tmp_path: Path) -> None:
+    """Whisper JSON is size-bounded before decoding and never retains capture audio."""
+    whisper = _script(tmp_path / 'whisper-cli', """
+import pathlib, sys
+base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])
+base.with_suffix('.json').write_bytes(b'x' * (2 * 1024 * 1024))
+""")
+    model = _asset(tmp_path / 'ggml-base.bin')
+    audio = _asset(tmp_path / 'input.wav')
+    from buddy_voice.providers import AudioCapture
+    with pytest.raises(SttError, match='exceeds'):
+        WhisperCppSpeechToTextProvider(binary=whisper, model=model).transcribe(
+            AudioCapture(b'', 0, 'en-US', audio))
+    assert not audio.exists()
+
+
 def test_whisper_invalid_output_is_structured_and_discards_recording(tmp_path: Path) -> None:
     whisper = _script(tmp_path / 'whisper-cli', 'import sys\n')
     model = _asset(tmp_path / 'ggml-base.bin')
     audio = _asset(tmp_path / 'input.wav')
     from buddy_voice.providers import AudioCapture
     provider = WhisperCppSpeechToTextProvider(binary=whisper, model=model)
-    with pytest.raises(SttError, match='invalid JSON'):
+    with pytest.raises(SttError, match='unsafe JSON'):
         provider.transcribe(AudioCapture(b'', 0, 'en-US', audio))
     assert not audio.exists()
 
@@ -299,6 +400,85 @@ with wave.open(path, 'wb') as output:
     assert speech.audio_path is not None and not speech.audio_path.exists()
 
 
+@pytest.mark.parametrize('unsafe_output', ('oversized', 'symlink'))
+def test_piper_rejects_unsafe_output_and_removes_private_directory(
+        tmp_path: Path, unsafe_output: str) -> None:
+    """Piper cannot make the provider read oversized or symlinked output WAVs."""
+    victim = _asset(tmp_path / 'victim.wav')
+    piper = _script(tmp_path / 'piper', f"""
+import os, pathlib, sys
+output = pathlib.Path(sys.argv[sys.argv.index('--output_file') + 1])
+victim = pathlib.Path(sys.argv[sys.argv.index('--model') + 1]).parent / 'victim.wav'
+if '{unsafe_output}' == 'oversized':
+    output.open('wb').truncate(9 * 1024 * 1024)
+else:
+    os.symlink(victim, output)
+""")
+    player = _script(tmp_path / 'pw-play', 'import sys\nsys.exit(0)\n')
+    en_model, en_config = _asset(tmp_path / 'en.onnx'), _asset(tmp_path / 'en.onnx.json')
+    de_model, de_config = _asset(tmp_path / 'de.onnx'), _asset(tmp_path / 'de.onnx.json')
+    provider = PiperTextToSpeechProvider(
+        piper_binary=piper, playback_binary=player,
+        english_voice=PiperVoice('en_test', 'en-US', en_model, en_config),
+        german_voice=PiperVoice('de_test', 'de-DE', de_model, de_config), temp_directory=tmp_path)
+    with pytest.raises(Exception, match='Piper output'):
+        provider.synthesize('hello', '', cancel_event=Event(), deadline_monotonic=time.monotonic() + 1.0)
+    assert victim.read_text() == 'local test asset'
+    assert not list(tmp_path.glob('buddy-piper-*'))
+
+
+def test_native_child_environment_is_allowlisted(monkeypatch, tmp_path: Path) -> None:
+    """Child processes receive required PipeWire variables, never arbitrary parent secrets."""
+    output = tmp_path / 'environment.json'
+    script = _script(tmp_path / 'environment', """
+import json, os, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps(dict(os.environ)))
+""")
+    monkeypatch.setenv('BUDDY_PROVIDER_TEST_SECRET', 'must-not-leak')
+    monkeypatch.setenv('PIPEWIRE_REMOTE', 'buddy-test-remote')
+    monkeypatch.setenv('XDG_RUNTIME_DIR', '/run/user/test')
+    child = _start([script, str(output)])
+    while child.poll() is None:
+        time.sleep(0.01)
+    _finish(child)
+    environment = json.loads(output.read_text())
+    assert environment['PIPEWIRE_REMOTE'] == 'buddy-test-remote'
+    assert environment['XDG_RUNTIME_DIR'] == '/run/user/test'
+    assert environment['PATH'] == os.environ['PATH']
+    assert 'BUDDY_PROVIDER_TEST_SECRET' not in environment
+
+
+def test_terminate_reaps_descendants_after_provider_leader_exits(tmp_path: Path) -> None:
+    """Owned process-group termination reaches a surviving child after leader exit."""
+    marker = tmp_path / 'descendant-terminated'
+    provider = _script(tmp_path / 'provider', """
+import pathlib, subprocess, sys
+marker = sys.argv[1]
+child = (
+    'import pathlib, signal, sys, time; '
+    'pathlib.Path(sys.argv[1] + ".ready").write_text("ready"); '
+    'signal.signal(signal.SIGTERM, lambda *_: (pathlib.Path(sys.argv[1]).write_text("done"), sys.exit(0))); '
+    'time.sleep(10)'
+)
+subprocess.Popen([sys.executable, '-c', child, marker])
+""")
+    child = _start([provider, str(marker)])
+    deadline = time.monotonic() + 1.0
+    while child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert child.poll() is not None
+    deadline = time.monotonic() + 1.0
+    while not Path(str(marker) + '.ready').exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert Path(str(marker) + '.ready').read_text() == 'ready'
+    _terminate(child)
+    deadline = time.monotonic() + 1.0
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    _finish(child)
+    assert marker.read_text() == 'done'
+
+
 @pytest.mark.parametrize(
     ('cancel_after_seconds', 'deadline_offset_seconds', 'expected_error'),
     ((0.05, 1.0, SpeechSynthesisCancelled), (None, 0.05, SpeechSynthesisTimeout)),
@@ -310,10 +490,11 @@ def test_piper_nonreading_stdin_is_cancellable_and_cleans_temp_audio(
         expected_error: type[Exception]) -> None:
     """Oversized valid text cannot block Piper cancellation, timeout, or cleanup."""
     piper = _script(tmp_path / 'piper', """
-import signal, sys, time
+import pathlib, signal, sys, time
 output = sys.argv[sys.argv.index('--output_file') + 1]
+marker = pathlib.Path(sys.argv[sys.argv.index('--model') + 1]).parent / 'terminated'
 def stop(*_):
-    open(output + '.terminated', 'w').write('terminated')
+    marker.write_text('terminated')
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, stop)
 while True: time.sleep(0.01)
@@ -342,7 +523,7 @@ while True: time.sleep(0.01)
         trigger.join()
     assert time.monotonic() - started < 0.6
     assert not list(tmp_path.glob('buddy-piper-*.wav'))
-    assert list(tmp_path.glob('buddy-piper-*.wav.terminated'))
+    assert (tmp_path / 'terminated').read_text() == 'terminated'
 
 
 def test_missing_local_assets_fail_closed_and_wakeword_stays_disabled(tmp_path: Path) -> None:

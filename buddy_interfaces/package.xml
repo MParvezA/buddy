@@ -5,7 +5,7 @@
   <description>Frozen cross-layer ROS interfaces for the Buddy robot.</description>
 
   <maintainer email="mohamedparvez27@gmail.com">Parvez</maintainer>
-  <license>Proprietary</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

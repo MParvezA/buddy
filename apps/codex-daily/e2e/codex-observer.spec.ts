@@ -16,7 +16,7 @@ test("observer discovers paginated chats, links a task, and reads detail transie
 
   await page.locator("#new-outcome").fill("Connect daily work");
   await page.getByRole("button", { name: "Add outcome" }).click();
-  const card = page.locator(".work-card").filter({
+  const card = page.locator(".session-brief-card").filter({
     has: page.getByRole("heading", { name: "Observed chat", exact: true }),
   });
   await card.getByRole("combobox").selectOption({ label: "Connect daily work" });
@@ -33,14 +33,16 @@ test("observer discovers paginated chats, links a task, and reads detail transie
   expect(briefsResponse.ok()).toBe(true);
   expect(briefsResponse.headers()["cache-control"]).toBe("no-store");
   const briefsBody = await briefsResponse.text();
-  expect(JSON.parse(briefsBody)).toMatchObject({
-    total: 2,
-    queued: 2,
-    items: [
-      expect.objectContaining({ analysisStatus: "queued", lastGood: null }),
-      expect.objectContaining({ analysisStatus: "queued", lastGood: null }),
-    ],
+  const parsedBriefs = JSON.parse(briefsBody);
+  expect(parsedBriefs).toMatchObject({
+    total: 10,
+    queued: 10,
   });
+  expect(parsedBriefs.items).toHaveLength(10);
+  expect(parsedBriefs.items.slice(0, 2)).toEqual([
+    expect.objectContaining({ analysisStatus: "queued", lastGood: null }),
+    expect.objectContaining({ analysisStatus: "queued", lastGood: null }),
+  ]);
   expect(briefsBody).not.toContain("deterministic_placeholder");
   expect(briefsBody).not.toMatch(
     /SECRET RESPONSE|SECRET PREVIEW|rawProtocol|prompt|reasoning|turns/,
@@ -62,8 +64,8 @@ test("observer discovers paginated chats, links a task, and reads detail transie
       }),
   );
   expect(JSON.parse(liveBrief)).toMatchObject({
-    total: 2,
-    queued: 2,
+    total: 10,
+    queued: 10,
   });
   expect(liveBrief).not.toContain("deterministic_placeholder");
   expect(liveBrief).not.toMatch(/SECRET RESPONSE|SECRET PREVIEW|prompt|reasoning|turns/);

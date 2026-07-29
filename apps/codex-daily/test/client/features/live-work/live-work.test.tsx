@@ -84,6 +84,30 @@ describe("Live Work", () => {
           );
         }
         if (url === "/api/observer") return Promise.resolve(Response.json(current));
+        if (url === "/api/session-briefs") {
+          return Promise.resolve(Response.json({
+            observer: { state: "connected", capability: "standalone_history" },
+            selectedAt: "2026-07-29T12:00:00.000Z",
+            items: [{
+              threadId: "thread-one",
+              targetUpdatedAt: "2026-07-29T12:00:00.000Z",
+              analysisStatus: "queued",
+              freshness: "missing",
+              lastGood: null,
+              failure: null,
+              queuedAt: "2026-07-29T12:00:00.000Z",
+              startedAt: null,
+              updatedAt: "2026-07-29T12:00:00.000Z",
+            }],
+            total: 1,
+            queued: 1,
+            analyzing: 0,
+            ready: 0,
+            stale: 0,
+            unavailable: 0,
+            failed: 0,
+          }));
+        }
         if (url.includes("/api/tasks/") && init?.method === "PUT") {
           current = {
             ...current,

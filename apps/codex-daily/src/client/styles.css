@@ -599,7 +599,7 @@ h3 {
 
 .card-list,
 .outcome-list,
-.work-grid,
+.session-brief-grid,
 .completed-list,
 .fact-block ul,
 .signal-list {
@@ -615,7 +615,7 @@ h3 {
 }
 
 .attention-card,
-.work-card {
+.session-brief-card {
   min-width: 0;
   padding: 15px;
   border: 1px solid var(--border);
@@ -639,7 +639,7 @@ h3 {
 }
 
 .attention-card h3,
-.work-card h3,
+.session-brief-card h3,
 .completed-list h3,
 .outcome-row h3 {
   margin: 12px 0 6px;
@@ -650,21 +650,21 @@ h3 {
 }
 
 .attention-card h3 a,
-.work-card h3 a,
+.session-brief-card h3 a,
 .completed-list h3 a {
   text-decoration-color: transparent;
   text-underline-offset: 3px;
 }
 
 .attention-card h3 a:hover,
-.work-card h3 a:hover,
+.session-brief-card h3 a:hover,
 .completed-list h3 a:hover {
   color: var(--mint);
   text-decoration-color: currentColor;
 }
 
 .attention-card p,
-.work-card p,
+.session-brief-card p,
 .completed-list p,
 .outcome-row p,
 .interpretation-block p,
@@ -1069,13 +1069,179 @@ h3 {
   padding: 4px 0;
 }
 
-.work-grid {
+.session-brief-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
-.work-card .status-unplanned {
+.session-brief-card .status-unplanned {
+  margin-top: 13px;
+}
+
+.session-briefs-heading {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.session-brief-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.brief-progress {
+  min-height: 18px;
+  margin: 0 0 16px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.session-brief-card {
+  overflow-wrap: anywhere;
+}
+
+.session-brief-card .thread-metadata {
+  display: grid;
+  gap: 2px;
+}
+
+.session-brief-card .thread-metadata span:first-child {
+  color: var(--text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.brief-lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.brief-result {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(110, 214, 174, 0.18);
+  border-radius: var(--radius-sm);
+  background: rgba(110, 214, 174, 0.035);
+}
+
+.brief-result.is-stale {
+  border-style: dashed;
+  border-color: rgba(233, 184, 108, 0.32);
+  background: rgba(233, 184, 108, 0.035);
+}
+
+.brief-provenance,
+.brief-evidence,
+.brief-current-state {
+  grid-column: 1 / -1;
+}
+
+.brief-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  color: var(--purple);
+  font-size: 10px;
+}
+
+.brief-provenance span,
+.brief-provenance time {
+  padding-right: 10px;
+  border-right: 1px solid var(--border);
+}
+
+.brief-provenance > :last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+.brief-block {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(9, 13, 17, 0.32);
+}
+
+.brief-block h4 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.brief-block p,
+.brief-block li {
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.brief-block ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+}
+
+.brief-empty {
+  font-style: italic;
+}
+
+.brief-evidence {
+  margin-top: 1px !important;
+  color: var(--text-faint) !important;
+  font-size: 10px !important;
+}
+
+.brief-placeholder,
+.brief-failure {
+  margin-top: 11px !important;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.brief-failure {
+  border: 1px solid rgba(239, 141, 131, 0.2);
+  color: var(--red) !important;
+}
+
+.brief-retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin-top: 11px;
+}
+
+.brief-retry span {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.brief-retry .secondary-button:disabled,
+.brief-retry .secondary-button[aria-disabled="true"],
+.session-brief-actions .primary-button:disabled,
+.session-brief-actions .primary-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.session-brief-count-note {
+  display: block;
   margin-top: 13px;
 }
 
@@ -1557,7 +1723,7 @@ h3 {
 
 @media (max-width: 900px) {
   .attention-list,
-  .work-grid {
+  .session-brief-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1666,6 +1832,16 @@ h3 {
     gap: 12px;
   }
 
+  .brief-result {
+    grid-template-columns: 1fr;
+  }
+
+  .brief-provenance,
+  .brief-evidence,
+  .brief-current-state {
+    grid-column: 1;
+  }
+
   .section-heading h2 {
     font-size: 17px;
   }
@@ -1714,6 +1890,50 @@ h3 {
 
   .section-heading {
     align-items: flex-start;
+  }
+
+  .session-briefs-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .session-brief-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .session-brief-actions .count-pill {
+    width: fit-content;
+  }
+
+  .session-brief-actions .primary-button,
+  .brief-retry .secondary-button {
+    width: 100%;
+  }
+
+  .thread-link-form {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .thread-link-form label {
+    min-width: 0;
+    flex: 1 1 180px;
+  }
+
+  .thread-link-form select {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .brief-provenance {
+    flex-direction: column;
+  }
+
+  .brief-provenance span,
+  .brief-provenance time {
+    padding-right: 0;
+    border-right: 0;
   }
 
   .count-pill,

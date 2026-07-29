@@ -6,6 +6,7 @@ import type { AttentionSnapshot } from "../shared/attention";
 import type { HealthResponse } from "../shared/dashboard";
 import type { ObserverSnapshot } from "../shared/observer-types";
 import type { PlanningView } from "../shared/planning";
+import type { SessionBriefSnapshot } from "../shared/session-briefs";
 import { App } from "./App";
 
 const health: HealthResponse = {
@@ -106,6 +107,28 @@ const attention: AttentionSnapshot = {
     localActionAt: null,
   })),
 };
+const sessionBriefs: SessionBriefSnapshot = {
+  observer: { state: "connected", capability: "standalone_history" },
+  selectedAt: "2026-07-29T12:00:00.000Z",
+  items: [{
+    threadId: "onboarding-refresh",
+    targetUpdatedAt: "2026-07-29T12:00:00.000Z",
+    analysisStatus: "queued",
+    freshness: "missing",
+    lastGood: null,
+    failure: null,
+    queuedAt: "2026-07-29T12:00:00.000Z",
+    startedAt: null,
+    updatedAt: "2026-07-29T12:00:00.000Z",
+  }],
+  total: 1,
+  queued: 1,
+  analyzing: 0,
+  ready: 0,
+  stale: 0,
+  unavailable: 0,
+  failed: 0,
+};
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -123,6 +146,9 @@ function mockSuccessfulApi() {
       if (url === "/api/health") return Promise.resolve(jsonResponse(health));
       if (url === "/api/planning") return Promise.resolve(jsonResponse(planning));
       if (url === "/api/observer") return Promise.resolve(jsonResponse(observer));
+      if (url === "/api/session-briefs") {
+        return Promise.resolve(jsonResponse(sessionBriefs));
+      }
       if (url === "/api/attention") return Promise.resolve(jsonResponse(attention));
       if (url === "/api/reports/latest") {
         return Promise.resolve(
@@ -204,7 +230,7 @@ describe("daily dashboard", () => {
     expect(orderedHeadings).toEqual([
       "Needs your attention",
       "Today’s outcomes and progress",
-      "Active and recent Codex chats",
+      "Recent session briefs",
       "Recently completed work",
       "Evening report",
     ]);

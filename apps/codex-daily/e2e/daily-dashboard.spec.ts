@@ -13,7 +13,7 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
   expect(sectionHeadings).toEqual([
     "Needs your attention",
     "Today’s outcomes and progress",
-    "Active and recent Codex chats",
+    "Recent session briefs",
     "Recently completed work",
     "Evening report",
   ]);
@@ -126,6 +126,36 @@ test("disconnected monitoring keeps planning and report history usable", async (
     });
   });
   await page.route("**/api/attention/events", (route) => route.abort());
+  await page.route("**/api/session-briefs", async (route) => {
+    await route.fulfill({
+      json: {
+        observer: { state: "disconnected", capability: "shared_live" },
+        selectedAt: "2026-07-29T10:00:00.000Z",
+        items: [{
+          threadId: "retained-thread",
+          targetUpdatedAt: "2026-07-29T10:00:00.000Z",
+          analysisStatus: "unavailable",
+          freshness: "missing",
+          lastGood: null,
+          failure: {
+            category: "observer_unavailable",
+            at: "2026-07-29T10:00:00.000Z",
+          },
+          queuedAt: null,
+          startedAt: null,
+          updatedAt: "2026-07-29T10:00:00.000Z",
+        }],
+        total: 1,
+        queued: 0,
+        analyzing: 0,
+        ready: 0,
+        stale: 0,
+        unavailable: 1,
+        failed: 0,
+      },
+    });
+  });
+  await page.route("**/api/session-briefs/events", (route) => route.abort());
 
   await page.goto("/");
   await expect(page.getByText("Codex disconnected", { exact: true })).toBeVisible();

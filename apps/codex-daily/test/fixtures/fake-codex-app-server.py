@@ -12,6 +12,11 @@ analysis_threads = set()
 
 
 def thread(thread_id, **overrides):
+    names = {
+        "thread-one": "Observed chat",
+        "thread-two": "Second observed chat",
+        "older-active-thread": "Older active chat",
+    }
     value = {
         "id": thread_id,
         "sessionId": f"session-{thread_id}",
@@ -32,7 +37,10 @@ def thread(thread_id, **overrides):
         "agentNickname": None,
         "agentRole": None,
         "gitInfo": None,
-        "name": "Second observed chat" if thread_id == "thread-two" else "Observed chat",
+        "name": names.get(
+            thread_id,
+            f"Recent session {thread_id.removeprefix('thread-')}",
+        ),
         "turns": [],
     }
     value.update(overrides)
@@ -48,6 +56,35 @@ shared_live = "proxy" in sys.argv
 method_log = os.environ.get("CODEX_DAILY_FAKE_METHOD_LOG")
 request_log = os.environ.get("CODEX_DAILY_FAKE_REQUEST_LOG")
 analysis_mode = os.environ.get("CODEX_DAILY_FAKE_ANALYSIS_MODE", "success")
+session_count = int(os.environ.get("CODEX_DAILY_FAKE_SESSION_COUNT", "2"))
+
+
+def ordinary_threads():
+    if session_count <= 2:
+        return [thread("thread-one"), thread("thread-two")]
+    recent = []
+    ids = ["thread-one", "thread-two"] + [
+        f"thread-{index}" for index in range(3, 11)
+    ]
+    for index, thread_id in enumerate(ids):
+        timestamp = 1785321000 - index * 60
+        recent.append(
+            thread(
+                thread_id,
+                updatedAt=timestamp,
+                recencyAt=timestamp,
+                status={"type": "idle", "activeFlags": []},
+            )
+        )
+    recent.append(
+        thread(
+            "older-active-thread",
+            updatedAt=1785310000,
+            recencyAt=1785310000,
+            status={"type": "active", "activeFlags": []},
+        )
+    )
+    return recent[:session_count]
 
 
 def live_fact():
@@ -182,7 +219,7 @@ for line in sys.stdin:
                 }
             )
         elif not params.get("cursor"):
-            data = [thread("thread-one")]
+            data = [ordinary_threads()[0]]
             if reporting_thread_created:
                 data.append(thread("codex-daily-reporting-thread"))
             send(
@@ -201,7 +238,7 @@ for line in sys.stdin:
                     "id": message["id"],
                     "result": {
                         "data": [
-                            thread("thread-two"),
+                            *ordinary_threads()[1:],
                             thread(
                                 "child-thread",
                                 parentThreadId="thread-one",

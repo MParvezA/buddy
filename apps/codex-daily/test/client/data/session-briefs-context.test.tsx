@@ -23,6 +23,17 @@ const initial: SessionBriefSnapshot = {
 const updated: SessionBriefSnapshot = {
   ...initial,
   selectedAt: "2026-07-29T12:01:00.000Z",
+  items: [{
+    threadId: "thread-one",
+    targetUpdatedAt: "2026-07-29T12:00:00.000Z",
+    analysisStatus: "queued",
+    freshness: "missing",
+    lastGood: null,
+    failure: null,
+    queuedAt: "2026-07-29T12:01:00.000Z",
+    startedAt: null,
+    updatedAt: "2026-07-29T12:01:00.000Z",
+  }],
   total: 1,
   queued: 1,
 };
@@ -46,6 +57,10 @@ class FakeEventSource {
       data: JSON.stringify(value),
     } as MessageEvent<string>);
   }
+
+  emitRaw(name: string, value: string) {
+    this.listeners.get(name)?.({ data: value } as MessageEvent<string>);
+  }
 }
 
 function Consumer() {
@@ -53,11 +68,21 @@ function Consumer() {
   return (
     <div>
       <span>{briefs.loading ? "loading" : `total:${briefs.snapshot?.total ?? -1}`}</span>
-      <span>{briefs.error ?? "no-error"}</span>
-      <button type="button" onClick={() => void briefs.refreshAll()}>
+      <span>{briefs.loadError ?? "no-load-error"}</span>
+      <span>{briefs.streamError ?? "no-stream-error"}</span>
+      <span>{briefs.mutationError ?? "no-mutation-error"}</span>
+      <button
+        type="button"
+        disabled={briefs.refreshingAll}
+        onClick={() => void briefs.refreshAll()}
+      >
         Refresh all
       </button>
-      <button type="button" onClick={() => void briefs.refreshThread("thread-one")}>
+      <button
+        type="button"
+        disabled={briefs.pendingThreadIds.has("thread-one")}
+        onClick={() => void briefs.refreshThread("thread-one")}
+      >
         Refresh one
       </button>
     </div>
@@ -103,10 +128,22 @@ describe("SessionBriefProvider", () => {
 
     source.emit("session-briefs", updated);
     expect(await screen.findByText("total:1")).toBeVisible();
+    source.emitRaw("session-briefs", "{not-json");
+    expect(
+      await screen.findByText(
+        "A live session-brief update could not be read; the last snapshot remains visible.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("total:1")).toBeVisible();
+    source.emitRaw(
+      "session-briefs",
+      JSON.stringify({ ...updated, items: [{ raw: "must not enter state" }] }),
+    );
+    expect(screen.getByText("total:1")).toBeVisible();
     source.onerror?.();
     expect(
       await screen.findByText(
-        "Live session-brief updates paused; the last snapshot remains visible.",
+        "Live brief updates paused; the last snapshot remains visible.",
       ),
     ).toBeVisible();
     expect(screen.getByText("total:1")).toBeVisible();
@@ -121,5 +158,24 @@ describe("SessionBriefProvider", () => {
     });
     view.unmount();
     expect(source.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not open SSE after an initial read failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ error: { message: "Brief inventory unavailable." } }),
+          { status: 503 },
+        ),
+      ),
+    );
+    render(
+      <SessionBriefProvider>
+        <Consumer />
+      </SessionBriefProvider>,
+    );
+    expect(await screen.findByText("Brief inventory unavailable.")).toBeVisible();
+    expect(FakeEventSource.instances).toHaveLength(0);
   });
 });

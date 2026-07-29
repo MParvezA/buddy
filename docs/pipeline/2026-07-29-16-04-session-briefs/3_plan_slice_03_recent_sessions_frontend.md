@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups: `FUP-001` through `FUP-005` remain deferred.
+Status: implemented
+Commit: `Slice 03: Recent Sessions Frontend` (this status-bearing commit)
+Verification: `npm run check` passed with 41 files/152 tests; full Playwright passed 20 runnable flows with 8 intentional mobile mutation skips; focused frontend coverage passed 8/8; repository contracts passed 4/4; protected-path and whitespace checks were clean. Browser proof covers exact newest-10 selection from 11 sessions, queued-to-ready live updates, refresh/retry, task linking, thread navigation, stale/offline/failure states, keyboard focus retention, and no horizontal overflow at 390×844.
+Deviations: Playwright required host-context execution after the sandboxed `tsx` IPC socket failed with `EPERM`. One test fixture was made independent after a prior privacy-deletion flow removed shared planning/link data; product behavior was unchanged.
+Follow-ups: None. `FUP-001` through `FUP-005` remain deferred.
 
 ## Context And Selected Slice
 

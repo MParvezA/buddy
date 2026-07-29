@@ -5,11 +5,13 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { SessionBriefSnapshot } from "../../shared/session-briefs";
 import {
   getSessionBriefs,
+  parseSessionBriefSnapshot,
   refreshSessionBrief,
   refreshSessionBriefs,
 } from "../api/session-briefs-client";
@@ -17,8 +19,10 @@ import {
 interface SessionBriefData {
   snapshot: SessionBriefSnapshot | null;
   loading: boolean;
-  error: string | null;
-  pendingThreadId: string | null;
+  loadError: string | null;
+  streamError: string | null;
+  mutationError: string | null;
+  pendingThreadIds: ReadonlySet<string>;
   refreshingAll: boolean;
   refreshAll: () => Promise<void>;
   refreshThread: (threadId: string) => Promise<void>;
@@ -29,9 +33,15 @@ const SessionBriefContext = createContext<SessionBriefData | null>(null);
 export function SessionBriefProvider({ children }: PropsWithChildren) {
   const [snapshot, setSnapshot] = useState<SessionBriefSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [pendingThreadIds, setPendingThreadIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const refreshingAllRef = useRef(false);
+  const pendingThreadIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     let active = true;
@@ -46,28 +56,26 @@ export function SessionBriefProvider({ children }: PropsWithChildren) {
           events.addEventListener("session-briefs", (event) => {
             if (!active) return;
             try {
-              setSnapshot(
-                JSON.parse(
-                  (event as MessageEvent<string>).data,
-                ) as SessionBriefSnapshot,
-              );
-              setError(null);
+              setSnapshot(parseSessionBriefSnapshot(
+                JSON.parse((event as MessageEvent<string>).data) as unknown,
+              ));
+              setStreamError(null);
             } catch {
-              setError("A live session-brief update could not be read.");
+              setStreamError(
+                "A live session-brief update could not be read; the last snapshot remains visible.",
+              );
             }
           });
           events.onerror = () => {
             if (active) {
-              setError(
-                "Live session-brief updates paused; the last snapshot remains visible.",
-              );
+              setStreamError("Live brief updates paused; the last snapshot remains visible.");
             }
           };
         }
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setError(
+        setLoadError(
           reason instanceof Error
             ? reason.message
             : "Session briefs could not be loaded.",
@@ -81,36 +89,40 @@ export function SessionBriefProvider({ children }: PropsWithChildren) {
   }, []);
 
   const refreshAll = useCallback(async () => {
+    if (refreshingAllRef.current) return;
+    refreshingAllRef.current = true;
     setRefreshingAll(true);
-    setError(null);
+    setMutationError(null);
     try {
       setSnapshot(await refreshSessionBriefs());
     } catch (reason) {
-      setError(
+      setMutationError(
         reason instanceof Error
           ? reason.message
           : "Session briefs could not be refreshed.",
       );
-      throw reason;
     } finally {
+      refreshingAllRef.current = false;
       setRefreshingAll(false);
     }
   }, []);
 
   const refreshThread = useCallback(async (threadId: string) => {
-    setPendingThreadId(threadId);
-    setError(null);
+    if (pendingThreadIdsRef.current.has(threadId)) return;
+    pendingThreadIdsRef.current.add(threadId);
+    setPendingThreadIds(new Set(pendingThreadIdsRef.current));
+    setMutationError(null);
     try {
       setSnapshot(await refreshSessionBrief(threadId));
     } catch (reason) {
-      setError(
+      setMutationError(
         reason instanceof Error
           ? reason.message
           : "The session brief could not be refreshed.",
       );
-      throw reason;
     } finally {
-      setPendingThreadId(null);
+      pendingThreadIdsRef.current.delete(threadId);
+      setPendingThreadIds(new Set(pendingThreadIdsRef.current));
     }
   }, []);
 
@@ -118,8 +130,10 @@ export function SessionBriefProvider({ children }: PropsWithChildren) {
     () => ({
       snapshot,
       loading,
-      error,
-      pendingThreadId,
+      loadError,
+      streamError,
+      mutationError,
+      pendingThreadIds,
       refreshingAll,
       refreshAll,
       refreshThread,
@@ -127,8 +141,10 @@ export function SessionBriefProvider({ children }: PropsWithChildren) {
     [
       snapshot,
       loading,
-      error,
-      pendingThreadId,
+      loadError,
+      streamError,
+      mutationError,
+      pendingThreadIds,
       refreshingAll,
       refreshAll,
       refreshThread,

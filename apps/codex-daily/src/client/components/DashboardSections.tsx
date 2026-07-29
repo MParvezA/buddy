@@ -1,7 +1,8 @@
 import { NeedsYou } from "../features/attention/NeedsYou";
 import { PlanningSection } from "../features/planning/PlanningSection";
-import { LiveWorkSections } from "../features/live-work/LiveWorkSections";
+import { RecentlyCompletedWork } from "../features/live-work/RecentlyCompletedWork";
 import { ReportPreview } from "../features/reports/ReportPreview";
+import { RecentSessionBriefs } from "../features/session-briefs/RecentSessionBriefs";
 import { usePlanning } from "../data/planning-context";
 
 export function DashboardSections() {
@@ -12,7 +13,9 @@ export function DashboardSections() {
 
       <PlanningSection />
 
-      <LiveWorkSections />
+      <RecentSessionBriefs />
+
+      <RecentlyCompletedWork />
 
       <ReportPreview />
     </div>

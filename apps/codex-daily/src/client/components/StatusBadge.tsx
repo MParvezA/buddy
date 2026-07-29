@@ -8,7 +8,8 @@ type StatusTone =
   | "confirmed"
   | "unplanned"
   | "fact"
-  | "generated";
+  | "generated"
+  | "blocked";
 
 interface StatusBadgeProps {
   tone: StatusTone;

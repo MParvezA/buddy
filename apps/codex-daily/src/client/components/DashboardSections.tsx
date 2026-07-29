@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import type { DashboardSnapshot } from "../../shared/dashboard";
+import { PlanningSection } from "../features/planning/PlanningSection";
 import { StatusBadge } from "./StatusBadge";
 
 interface DashboardSectionsProps {
@@ -16,8 +17,6 @@ function formatTime(value: string, timezone: string) {
 }
 
 export function DashboardSections({ snapshot }: DashboardSectionsProps) {
-  const confirmed = snapshot.outcomes.filter((item) => item.status === "confirmed").length;
-
   return (
     <div className="dashboard-stack" data-testid="dashboard-sections">
       <section className="panel attention-panel" data-section-order="1" aria-labelledby="attention-title">
@@ -44,47 +43,7 @@ export function DashboardSections({ snapshot }: DashboardSectionsProps) {
         </ul>
       </section>
 
-      <section className="panel" data-section-order="2" aria-labelledby="outcomes-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Priority 02</p>
-            <h2 id="outcomes-title">Today’s outcomes and progress</h2>
-          </div>
-          <span className="progress-copy">
-            <strong>{confirmed}</strong> / {snapshot.outcomes.length} confirmed
-          </span>
-        </div>
-        <div
-          className="progress-track"
-          role="progressbar"
-          aria-label="Confirmed outcomes"
-          aria-valuemin={0}
-          aria-valuemax={snapshot.outcomes.length}
-          aria-valuenow={confirmed}
-        >
-          <span style={{ width: `${(confirmed / snapshot.outcomes.length) * 100}%` }} />
-        </div>
-        <ul className="outcome-list">
-          {snapshot.outcomes.map((outcome) => (
-            <li key={outcome.id} className="outcome-row">
-              <div className={`outcome-icon outcome-${outcome.status}`} aria-hidden="true">
-                {outcome.status === "confirmed" ? "✓" : outcome.status === "suggested" ? "?" : "·"}
-              </div>
-              <div className="outcome-copy">
-                <div className="outcome-title-line">
-                  <h3>{outcome.title}</h3>
-                  <span className="priority-label">{outcome.priority}</span>
-                </div>
-                <p>{outcome.note}</p>
-                <StatusBadge tone={outcome.status}>{outcome.statusLabel}</StatusBadge>
-                {outcome.status === "suggested" && (
-                  <small className="operator-note">Only you can confirm this outcome.</small>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      </section>
+      <PlanningSection />
 
       <section className="panel" data-section-order="3" aria-labelledby="active-title">
         <div className="section-heading">

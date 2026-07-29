@@ -12,7 +12,7 @@ export function ConnectionIndicator({ serviceAvailable }: ConnectionIndicatorPro
   const detail =
     serviceAvailable === false
       ? "Today’s local surface may be unavailable."
-      : "Representative data · monitoring starts in a later slice";
+      : "Local planning · monitoring starts in a later slice";
 
   return (
     <div className="connection-indicator" role="status" aria-live="polite">

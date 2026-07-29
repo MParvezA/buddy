@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 02: Morning Planning` (this status-bearing commit)
+Verification: `npm run check` passed with 5 files/18 tests; Playwright passed the complete planning lifecycle plus dashboard regression (5 passed, 1 intentional duplicate mobile-flow skip); restart/schema smoke proved persistence and planning-only tables; repository contracts passed 4/4; protected-path diff was empty.
+Deviations: Browser/loopback verification and clean install required sandbox escalation. The mutating lifecycle runs once on desktop while the dashboard regression remains desktop/mobile. `npm ci` reported seven dependency advisories; dependency remediation was not expanded into this slice.
+Follow-ups: None. FUP-001 through FUP-006 remain deferred.
 
 ## Implementation Context
 

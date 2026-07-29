@@ -64,7 +64,7 @@ export function AppShell() {
             <span aria-hidden="true">⌂</span>
             <p>
               <strong>Private by default</strong>
-              Representative data stays in this local service.
+              Planning stays in the local SQLite store.
             </p>
           </div>
         </nav>

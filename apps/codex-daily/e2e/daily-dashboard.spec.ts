@@ -5,7 +5,7 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
 
   await expect(page.getByRole("heading", { name: "Needs your attention" })).toBeVisible();
   await expect(page.getByText("Codex not connected", { exact: true })).toBeVisible();
-  await expect(page.getByText("Representative day")).toBeVisible();
+  await expect(page.getByText("Local daily plan")).toBeVisible();
 
   const sectionHeadings = await page
     .locator('[data-testid="dashboard-sections"] > section > .section-heading h2')

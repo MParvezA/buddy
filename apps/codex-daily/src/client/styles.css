@@ -650,6 +650,192 @@ h3 {
   font-size: 10px;
 }
 
+.planning-status,
+.review-intro,
+.planning-empty {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.planning-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.error-message {
+  border-color: rgba(239, 141, 131, 0.3);
+  color: var(--red);
+}
+
+.planning-status button,
+.review-actions button,
+.reschedule-form button,
+.outcome-actions button,
+.primary-button {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.primary-button {
+  border-color: rgba(110, 214, 174, 0.35);
+  background: var(--mint-soft);
+  color: var(--mint);
+}
+
+.planning-status button:disabled,
+.review-actions button:disabled,
+.reschedule-form button:disabled,
+.outcome-actions button:disabled,
+.primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.review-gate {
+  display: grid;
+  gap: 16px;
+}
+
+.review-intro {
+  padding: 14px;
+  border: 1px solid rgba(233, 184, 108, 0.25);
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+}
+
+.review-intro p {
+  margin: 10px 0 0;
+}
+
+.review-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-card {
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(9, 13, 17, 0.36);
+}
+
+.review-card h3 {
+  margin: 7px 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.review-card > p:not(.historical-date) {
+  margin: 0 0 12px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.historical-date,
+.pending-copy {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.review-actions,
+.outcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.reschedule-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.reschedule-form label,
+.outcome-form label,
+.edit-outcome-form label {
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.outcome-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(9, 13, 17, 0.36);
+}
+
+.outcome-form > div,
+.edit-outcome-form {
+  display: grid;
+  gap: 6px;
+}
+
+.outcome-form input,
+.outcome-form textarea,
+.edit-outcome-form input,
+.edit-outcome-form textarea,
+.reschedule-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.outcome-form textarea,
+.edit-outcome-form textarea {
+  resize: vertical;
+}
+
+.planning-empty {
+  margin: 18px 0 2px;
+  text-align: center;
+}
+
+.durable-outcome {
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.durable-outcome h3 {
+  margin: 4px 0 7px;
+}
+
+.edit-outcome-form {
+  padding: 4px 0;
+}
+
 .work-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -973,6 +1159,11 @@ h3 {
 
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .outcome-form {
+    grid-template-columns: 1fr;
+    align-items: stretch;
   }
 }
 

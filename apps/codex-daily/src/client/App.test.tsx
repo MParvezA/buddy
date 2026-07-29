@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { representativeDay } from "../server/representative-day";
 import type { HealthResponse } from "../shared/dashboard";
+import type { PlanningView } from "../shared/planning";
 import { App } from "./App";
 
 const health: HealthResponse = {
@@ -11,6 +12,27 @@ const health: HealthResponse = {
   status: "ok",
   mode: "representative",
   connection: "not-connected",
+};
+const planning: PlanningView = {
+  localDate: "2026-07-29",
+  timezone: "Europe/Berlin",
+  reviewRequired: false,
+  tasks: [
+    {
+      id: "task-one",
+      localDate: "2026-07-29",
+      title: "Ship the morning plan",
+      clarification: "Keep completion operator-owned.",
+      position: 0,
+      lifecycle: "open",
+      originTaskId: null,
+      createdAt: "2026-07-29T08:00:00.000Z",
+      updatedAt: "2026-07-29T08:00:00.000Z",
+      completedAt: null,
+      closedAt: null,
+    },
+  ],
+  priorDay: { localDate: "2026-07-28", unresolvedTasks: [] },
 };
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
@@ -28,6 +50,7 @@ function mockSuccessfulApi() {
       const url = String(input);
       if (url === "/api/health") return Promise.resolve(jsonResponse(health));
       if (url === "/api/day") return Promise.resolve(jsonResponse(representativeDay));
+      if (url === "/api/planning") return Promise.resolve(jsonResponse(planning));
       return Promise.resolve(jsonResponse({ error: "Not found" }, { status: 404 }));
     }),
   );
@@ -87,13 +110,13 @@ describe("daily dashboard", () => {
     expect(scoped.queryByText("Confirmed complete")).not.toBeInTheDocument();
   });
 
-  it("distinguishes suggested completion from user-confirmed completion", async () => {
+  it("shows durable outcomes as open until the operator confirms them", async () => {
     renderApp();
 
-    expect(await screen.findByText("Confirmed complete")).toBeVisible();
-    expect(screen.getByText("Looks complete · needs your confirmation")).toBeVisible();
-    expect(screen.getByText("Only you can confirm this outcome.")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /confirm/i })).not.toBeInTheDocument();
+    expect(await screen.findByText("Ship the morning plan")).toBeVisible();
+    expect(screen.getByText("Open")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Confirm complete" })).toBeVisible();
+    expect(screen.queryByText("Operator confirmed complete")).not.toBeInTheDocument();
   });
 
   it("shows a useful error while preserving the shell when the day request fails", async () => {
@@ -101,6 +124,7 @@ describe("daily dashboard", () => {
       "fetch",
       vi.fn((input: RequestInfo | URL) => {
         if (String(input) === "/api/health") return Promise.resolve(jsonResponse(health));
+        if (String(input) === "/api/planning") return Promise.resolve(jsonResponse(planning));
         return Promise.resolve(jsonResponse({ error: "Unavailable" }, { status: 503 }));
       }),
     );

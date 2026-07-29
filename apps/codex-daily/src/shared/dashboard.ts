@@ -6,7 +6,6 @@ export type AttentionKind =
   | "interruption"
   | "blocker"
   | "possibly-stale";
-export type OutcomeStatus = "confirmed" | "suggested" | "pending" | "blocked";
 export type ThreadStatus = "working" | "waiting" | "possibly-stale";
 
 export interface HealthResponse {
@@ -25,16 +24,6 @@ export interface AttentionItem {
   occurredAt: string;
   threadId: string;
   certainty: "explicit" | "possible";
-}
-
-export interface DailyOutcome {
-  id: string;
-  title: string;
-  note: string;
-  priority: "High" | "Medium";
-  status: OutcomeStatus;
-  statusLabel: string;
-  linkedThreadIds: string[];
 }
 
 export interface WorkThread {
@@ -74,7 +63,6 @@ export interface DashboardSnapshot {
     detail: string;
   };
   attention: AttentionItem[];
-  outcomes: DailyOutcome[];
   activeThreads: WorkThread[];
   recentlyCompleted: CompletedWorkItem[];
   reportPreview: ReportPreview;

@@ -1,6 +1,13 @@
-import type { AttentionKind, OutcomeStatus, ThreadStatus } from "../../shared/dashboard";
+import type { AttentionKind, ThreadStatus } from "../../shared/dashboard";
 
-type StatusTone = AttentionKind | OutcomeStatus | ThreadStatus | "unplanned" | "fact" | "generated";
+type StatusTone =
+  | AttentionKind
+  | ThreadStatus
+  | "pending"
+  | "confirmed"
+  | "unplanned"
+  | "fact"
+  | "generated";
 
 interface StatusBadgeProps {
   tone: StatusTone;

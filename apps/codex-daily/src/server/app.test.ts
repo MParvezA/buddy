@@ -13,7 +13,7 @@ afterEach(async () => {
 
 describe("local service", () => {
   it("returns deterministic representative health and day contracts", async () => {
-    app = await buildApp({ serveStatic: false });
+    app = await buildApp({ serveStatic: false, databasePath: ":memory:" });
 
     const health = await app.inject({ method: "GET", url: "/api/health" });
     const day = await app.inject({ method: "GET", url: "/api/day" });
@@ -41,11 +41,23 @@ describe("local service", () => {
     ]);
   });
 
-  it("exposes only read endpoints", async () => {
-    app = await buildApp({ serveStatic: false });
+  it("adds an empty durable planning resource without changing representative monitoring", async () => {
+    app = await buildApp({
+      serveStatic: false,
+      databasePath: ":memory:",
+      clock: () => new Date("2026-07-29T12:00:00.000Z"),
+    });
 
-    const response = await app.inject({ method: "POST", url: "/api/day" });
+    const planning = await app.inject({ method: "GET", url: "/api/planning" });
+    const unsupported = await app.inject({ method: "POST", url: "/api/day" });
 
-    expect(response.statusCode).toBe(404);
+    expect(planning.statusCode).toBe(200);
+    expect(planning.json()).toMatchObject({
+      localDate: "2026-07-29",
+      timezone: "Europe/Berlin",
+      reviewRequired: false,
+      tasks: [],
+    });
+    expect(unsupported.statusCode).toBe(404);
   });
 });

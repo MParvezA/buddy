@@ -26,9 +26,14 @@ def _arguments() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_arguments(argv: list[str] | None) -> tuple[argparse.Namespace, list[str]]:
+    """Parse provider options while preserving ordinary ROS 2 arguments/remaps."""
+    return _arguments().parse_known_args(argv)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run Enter-to-start/Enter-to-stop capture beside the fake simulation launch."""
-    args = _arguments().parse_args(argv)
+    args, ros_args = _parse_arguments(argv)
     audio = PipeWirePushToTalkAudioInput(
         record_binary=args.record_binary,
         device=args.device,
@@ -42,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
         timeout_seconds=args.stt_timeout_seconds,
         language=args.stt_language,
     )
-    rclpy.init()
+    rclpy.init(args=ros_args)
     node = BuddyVoiceNode(audio, stt, node_name='terminal_ptt')
     released: Event | None = None
     worker: Thread | None = None

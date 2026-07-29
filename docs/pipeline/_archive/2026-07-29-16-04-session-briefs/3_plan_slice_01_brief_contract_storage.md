@@ -1,5 +1,7 @@
 # Codex Daily — Slice 01 Brief Contract And Storage Plan
 
+Archived after completed implementation review and cleanup.
+
 ## Implementation Status
 
 Status: implemented

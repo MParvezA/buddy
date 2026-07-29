@@ -1,5 +1,7 @@
 # Codex Daily — Slice 03 Recent Sessions Frontend Plan
 
+Archived after completed implementation review and cleanup.
+
 ## Implementation Status
 
 Status: implemented

@@ -1,5 +1,7 @@
 # Recent Session Briefs — Implementation Review
 
+Archived after completed implementation review and cleanup.
+
 ## Review Scope
 
 - Reviewed commits: `745c0f8`, `b35d70f`, `92ea030`, and `bc73241`

@@ -1,5 +1,7 @@
 # Codex Daily — Recent Session Briefs Design
 
+Archived after completed implementation review and cleanup.
+
 ## Goal
 
 Turn the 10 most recent ordinary Codex sessions into a continuously refreshed,

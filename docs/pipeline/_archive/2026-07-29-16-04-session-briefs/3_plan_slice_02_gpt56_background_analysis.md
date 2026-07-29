@@ -1,5 +1,7 @@
 # Codex Daily — Slice 02 GPT-5.6 Background Analysis
 
+Archived after completed implementation review and cleanup.
+
 ## Implementation Status
 
 Status: implemented

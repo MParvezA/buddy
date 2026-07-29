@@ -1,5 +1,7 @@
 # Codex Daily — Slice 04 Operational Proof Plan
 
+Archived after completed implementation review and cleanup.
+
 ## Implementation Status
 
 Status: implemented

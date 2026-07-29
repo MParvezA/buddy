@@ -1,5 +1,7 @@
 # Codex Daily — Recent Session Briefs Slice Roadmap
 
+Archived after completed implementation review and cleanup.
+
 ## Context
 
 - Repository: `/home/syncrobot/buddy`

@@ -1,5 +1,7 @@
 # Codex Daily — Recent Session Briefs Alignment
 
+Archived after completed implementation review and cleanup.
+
 ## Short Feature Name
 
 Recent Session Briefs

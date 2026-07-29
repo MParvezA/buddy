@@ -1,15 +1,15 @@
 """
 Replaceable audio, wake-word, STT, and TTS provider boundaries.
 
-Concrete openWakeWord, whisper.cpp, and Piper adapters intentionally do not
-live here until their native dependencies are selected and installed.  The
-fakes below make the ROS components deterministic in simulation and tests.
+Concrete local adapters live in :mod:`local_providers`, keeping this small
+contract and its fakes deterministic for simulation and tests.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Event
 import time
 from typing import Protocol, Sequence
@@ -22,6 +22,7 @@ class AudioCapture:
     samples: bytes
     input_mode: int
     locale: str = 'en-US'
+    audio_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class SynthesizedSpeech:
     """Synthesized local audio represented by its deterministic duration."""
 
     duration_seconds: float
+    audio_path: Path | None = None
 
 
 class AudioInputProvider(Protocol):
@@ -82,6 +84,17 @@ class TextToSpeechProvider(Protocol):
             deadline_monotonic: float) -> SynthesizedSpeech:
         """Return audio metadata or raise one of the bounded-call errors."""
 
+    def play(
+            self,
+            speech: SynthesizedSpeech,
+            *,
+            cancel_event: Event,
+            deadline_monotonic: float) -> None:
+        """Play already-synthesized audio without claiming synthesis succeeded."""
+
+    def cleanup(self, speech: SynthesizedSpeech) -> None:
+        """Remove any temporary audio owned by this provider."""
+
 
 class SpeechSynthesisError(RuntimeError):
     """A provider could not synthesize the requested speech."""
@@ -93,6 +106,18 @@ class SpeechSynthesisCancelled(SpeechSynthesisError):
 
 class SpeechSynthesisTimeout(SpeechSynthesisError):
     """A cooperative provider reached the action's steady-clock deadline."""
+
+
+class SpeechPlaybackError(SpeechSynthesisError):
+    """A provider could not play synthesized speech."""
+
+
+class SpeechPlaybackCancelled(SpeechPlaybackError):
+    """Playback stopped because the action was cancelled."""
+
+
+class SpeechPlaybackTimeout(SpeechPlaybackError):
+    """Playback reached its steady-clock deadline."""
 
 
 class PushToTalkAudioInput:
@@ -194,3 +219,18 @@ class FakeTextToSpeechProvider:
         if text in self.unexpected_for:
             raise RuntimeError('fake unexpected TTS provider error')
         return SynthesizedSpeech(self.duration_seconds)
+
+    def play(
+            self,
+            speech: SynthesizedSpeech,
+            *,
+            cancel_event: Event,
+            deadline_monotonic: float) -> None:
+        """Provide a zero-cost fake playback boundary for component tests."""
+        if cancel_event.is_set():
+            raise SpeechPlaybackCancelled('fake TTS playback cancelled')
+        if time.monotonic() >= deadline_monotonic:
+            raise SpeechPlaybackTimeout('fake TTS playback timed out')
+
+    def cleanup(self, speech: SynthesizedSpeech) -> None:
+        """Fake synthesis owns no temporary audio."""

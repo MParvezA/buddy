@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { AttentionItem } from "../../shared/attention";
-import type { TransientThreadDetail } from "../../shared/observer-types";
+import type { ThreadDetail } from "../../shared/observer-types";
 import { getThreadAttention } from "../api/attention-client";
 import { getThreadDetail } from "../api/observer-client";
 import { StatusBadge } from "../components/StatusBadge";
@@ -10,7 +10,7 @@ import { useObserver } from "../data/observer-context";
 export function ThreadDetailPage() {
   const { threadId = "" } = useParams();
   const observer = useObserver();
-  const [detail, setDetail] = useState<TransientThreadDetail | null>(null);
+  const [detail, setDetail] = useState<ThreadDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attentionHistory, setAttentionHistory] = useState<AttentionItem[]>([]);
   const [attentionLoading, setAttentionLoading] = useState(true);
@@ -68,8 +68,9 @@ export function ThreadDetailPage() {
           <p className="eyebrow">Transient Codex detail</p>
           <h1>{thread?.title ?? "Untitled Codex chat"}</h1>
           <p>
-            Full history is fetched from Codex for this request only. It is not stored or sent
-            through live dashboard events.
+            Full history is fetched from Codex for this request only when connected
+            and is never stored or sent through live dashboard events. Retained
+            normalized facts stay available locally.
           </p>
         </div>
         {thread && (
@@ -96,11 +97,15 @@ export function ThreadDetailPage() {
               <div>
                 <dt>Transient history</dt>
                 <dd>
-                  {error
-                    ? error
-                    : detail
-                      ? `${detail.turns.length} turns fetched in request memory`
-                      : "Reading from Codex…"}
+                  {error ? (
+                    error
+                  ) : !detail ? (
+                    "Checking Codex availability…"
+                  ) : detail.transientHistory.status === "available" ? (
+                    `${detail.transientHistory.turns.length} turns fetched in request memory`
+                  ) : (
+                    detail.transientHistory.reason
+                  )}
                 </dd>
               </div>
             </dl>

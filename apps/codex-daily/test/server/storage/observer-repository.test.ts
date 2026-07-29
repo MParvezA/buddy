@@ -197,6 +197,39 @@ describe("ObserverRepository", () => {
     database.close();
   });
 
+  it("returns every retained per-thread activity including attention sources beyond 1,000 rows", () => {
+    const database = openDatabase({ path: ":memory:" });
+    const observer = new ObserverRepository(database.connection);
+    observer.upsertThread(thread);
+    for (let index = 0; index < 1_001; index += 1) {
+      observer.addActivity({
+        sourceKey:
+          index === 0
+            ? "request:process:connection-1:thread-one:1:pending"
+            : `item:thread-one:turn-${index}:item-${index}:completed`,
+        threadId: thread.id,
+        turnId: `turn-${index}`,
+        itemId: index === 0 ? "approval-item" : `item-${index}`,
+        occurredAt: new Date(
+          Date.parse("2026-07-29T00:00:00.000Z") + index,
+        ).toISOString(),
+        category: index === 0 ? "approval" : "item",
+        lifecycle: index === 0 ? "pending" : "completed",
+        label: index === 0 ? "Command approval requested" : "Item completed",
+      });
+    }
+
+    const activities = observer.listActivitiesForThread(thread.id);
+
+    expect(activities).toHaveLength(1_001);
+    expect(activities.at(-1)).toMatchObject({
+      sourceKey: "request:process:connection-1:thread-one:1:pending",
+      category: "approval",
+      lifecycle: "pending",
+    });
+    database.close();
+  });
+
   it("retains repeated goal-clear episodes after new blocked episodes", () => {
     const database = openDatabase({ path: ":memory:" });
     const observer = new ObserverRepository(database.connection);

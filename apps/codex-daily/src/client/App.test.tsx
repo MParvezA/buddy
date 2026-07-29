@@ -161,8 +161,11 @@ function mockSuccessfulApi() {
           jsonResponse({
             thread: observer.threads[0],
             activities: observer.activities,
-            turns: [{ id: "turn-1" }],
-            fetchedAt: "2026-07-29T12:01:00.000Z",
+            transientHistory: {
+              status: "available",
+              turns: [{ id: "turn-1" }],
+              fetchedAt: "2026-07-29T12:01:00.000Z",
+            },
           }),
         );
       }

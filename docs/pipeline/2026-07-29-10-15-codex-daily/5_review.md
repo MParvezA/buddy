@@ -270,3 +270,28 @@ Repeat-review verification:
 
 Decision: revise RR1 and RR2 before cleanup. Existing accepted deviations remain
 unchanged.
+
+### RR1/RR2 Correction Implementation
+
+Status: implemented; final repeat review required.
+
+Thread detail now returns retained metadata and the complete normalized
+per-thread timeline independently of optional live Codex history. Transient
+history is represented as an explicit available/unavailable state, so a
+disconnected or failed `thread/read` leaves locally retained facts visible while
+truthfully explaining that full history is unavailable. Full turn bodies remain
+request-scoped, non-cacheable, unpersisted, and absent from SSE.
+
+Verification:
+
+- Focused correction coverage: 5 files and 24 tests passed.
+- `npm run check`: passed; 31 files and 99 tests.
+- `npm run test:e2e`: passed independently; 16 passed and 6 intentional mobile
+  mutation duplicates skipped. The disconnected workflow visits thread detail
+  and proves retained facts at desktop and 390px.
+- A 1,001-event regression proves the oldest retained approval source remains
+  available.
+- Repository contracts: 4 passed.
+- Protected-path and whitespace checks: clean.
+
+Next action: commit this narrow correction and repeat `5_Review`.

@@ -1,6 +1,6 @@
 import type {
   ObserverSnapshot,
-  TransientThreadDetail,
+  ThreadDetail,
 } from "../../shared/observer-types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -24,7 +24,7 @@ export function getObserver(): Promise<ObserverSnapshot> {
   return request("/api/observer");
 }
 
-export function getThreadDetail(threadId: string): Promise<TransientThreadDetail> {
+export function getThreadDetail(threadId: string): Promise<ThreadDetail> {
   return request(`/api/observer/threads/${encodeURIComponent(threadId)}`, {
     cache: "no-store",
   });

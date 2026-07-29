@@ -75,15 +75,26 @@ export interface ObserverSseEvent {
   snapshot: ObserverSnapshot;
 }
 
+export type TransientThreadHistory =
+  | {
+      status: "available";
+      turns: unknown[];
+      fetchedAt: string;
+    }
+  | {
+      status: "unavailable";
+      reason: string;
+    };
+
 /**
- * Full turn/item bodies are deliberately request-scoped and are never accepted
- * by the persistence repository or SSE DTOs.
+ * Metadata and normalized activities are retained locally. Full turn/item
+ * bodies exist only in the available transient-history branch and are never
+ * accepted by the persistence repository or SSE DTOs.
  */
-export interface TransientThreadDetail {
+export interface ThreadDetail {
   thread: ObservedThread;
   activities: ObservedActivity[];
-  turns: unknown[];
-  fetchedAt: string;
+  transientHistory: TransientThreadHistory;
 }
 
 export interface ObserverErrorResponse {

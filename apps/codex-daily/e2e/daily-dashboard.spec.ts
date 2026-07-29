@@ -55,6 +55,33 @@ test("built app routes through thread, report, settings, and back to Today", asy
 test("disconnected monitoring keeps planning and report history usable", async ({
   page,
 }) => {
+  const retainedThread = {
+    id: "retained-thread",
+    sessionId: "retained-session",
+    title: "Retained offline work",
+    cwd: "/workspace/retained",
+    source: "cli",
+    cliVersion: "0.146.0",
+    createdAt: "2026-07-29T10:00:00.000Z",
+    updatedAt: "2026-07-29T10:00:00.000Z",
+    recencyAt: "2026-07-29T10:00:00.000Z",
+    archived: false,
+    lastObservedAt: "2026-07-29T10:00:00.000Z",
+    runtime: "unknown",
+    waitingOnApproval: false,
+    waitingOnUserInput: false,
+    lastActivityAt: "2026-07-29T10:00:00.000Z",
+  };
+  const retainedActivity = {
+    sourceKey: "turn:retained-thread:turn-one:failed",
+    threadId: "retained-thread",
+    turnId: "turn-one",
+    itemId: null,
+    occurredAt: "2026-07-29T10:00:00.000Z",
+    category: "turn",
+    lifecycle: "failed",
+    label: "Retained offline failure",
+  };
   await page.route("**/api/observer", async (route) => {
     await route.fulfill({
       json: {
@@ -65,12 +92,28 @@ test("disconnected monitoring keeps planning and report history usable", async (
           lastInventoryRefreshAt: "2026-07-29T10:00:00.000Z",
           diagnostic: "Codex is temporarily unavailable.",
         },
-        threads: [],
-        activities: [],
+        threads: [retainedThread],
+        activities: [retainedActivity],
         taskLinks: [],
       },
     });
   });
+  await page.route(
+    "**/api/observer/threads/retained-thread",
+    async (route) => {
+      await route.fulfill({
+        headers: { "cache-control": "no-store" },
+        json: {
+          thread: retainedThread,
+          activities: [retainedActivity],
+          transientHistory: {
+            status: "unavailable",
+            reason: "Codex is disconnected; full history is unavailable.",
+          },
+        },
+      });
+    },
+  );
   await page.route("**/api/observer/events", (route) => route.abort());
   await page.route("**/api/attention", async (route) => {
     await route.fulfill({
@@ -90,6 +133,15 @@ test("disconnected monitoring keeps planning and report history usable", async (
   await expect(
     page.getByRole("region", { name: "Today’s outcomes and progress" }),
   ).toBeVisible();
+  await page.getByRole("link", { name: "Retained offline work" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Retained offline work", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText(/Retained offline failure/)).toBeVisible();
+  await expect(
+    page.getByText("Codex is disconnected; full history is unavailable."),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Back to Today" }).click();
   await page.getByRole("link", { name: "Reports" }).click();
   await expect(page.getByRole("heading", { name: "Report history" })).toBeVisible();
 });

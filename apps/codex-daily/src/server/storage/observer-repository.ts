@@ -254,7 +254,7 @@ export class ObserverRepository {
     return rows.map(mapActivity);
   }
 
-  listActivitiesForThread(threadId: string, limit = 1_000): ObservedActivity[] {
+  listActivitiesForThread(threadId: string): ObservedActivity[] {
     const rows = this.db
       .prepare(`
         SELECT activities.*
@@ -263,9 +263,8 @@ export class ObserverRepository {
           ON exclusions.thread_id = activities.thread_id
         WHERE activities.thread_id = ? AND exclusions.thread_id IS NULL
         ORDER BY activities.occurred_at DESC, activities.source_key
-        LIMIT ?
       `)
-      .all(threadId, limit) as unknown as ActivityRow[];
+      .all(threadId) as unknown as ActivityRow[];
     return rows.map(mapActivity);
   }
 

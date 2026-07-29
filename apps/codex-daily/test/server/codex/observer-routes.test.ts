@@ -8,6 +8,7 @@ import { ObserverService } from "../../../src/server/codex/observer-service.js";
 import { openDatabase, type PlanningDatabase } from "../../../src/server/storage/database.js";
 import { ObserverRepository } from "../../../src/server/storage/observer-repository.js";
 import { PlanningRepository } from "../../../src/server/storage/planning-repository.js";
+import type { ObservedThread } from "../../../src/shared/observer-types.js";
 
 const fixture = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -59,6 +60,10 @@ describe("observer routes", () => {
     expect(detail.headers["cache-control"]).toBe("no-store");
     expect(detail.body).toContain("SECRET RESPONSE");
     expect(detail.json().activities.length).toBeGreaterThan(0);
+    expect(detail.json().transientHistory).toMatchObject({
+      status: "available",
+      turns: expect.any(Array),
+    });
     expect((await app.inject({ method: "GET", url: "/api/observer" })).body).not.toContain(
       "SECRET RESPONSE",
     );
@@ -77,6 +82,60 @@ describe("observer routes", () => {
     });
     expect(removed.statusCode).toBe(200);
     expect(removed.json().taskLinks).toEqual([]);
+  });
+
+  it("serves retained metadata and activity when transient history is unavailable", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const repository = new ObserverRepository(database.connection);
+    const now = "2026-07-29T12:00:00.000Z";
+    const thread: ObservedThread = {
+      id: "retained-thread",
+      sessionId: "retained-session",
+      title: "Retained offline work",
+      cwd: "/workspace/retained",
+      source: "cli",
+      cliVersion: "0.146.0",
+      createdAt: now,
+      updatedAt: now,
+      recencyAt: now,
+      archived: false,
+      lastObservedAt: now,
+      runtime: "unknown",
+      waitingOnApproval: false,
+      waitingOnUserInput: false,
+      lastActivityAt: now,
+    };
+    repository.upsertThread(thread);
+    repository.addActivity({
+      sourceKey: "turn:retained-thread:turn-one:failed",
+      threadId: thread.id,
+      turnId: "turn-one",
+      itemId: null,
+      occurredAt: now,
+      category: "turn",
+      lifecycle: "failed",
+      label: "Turn failed",
+    });
+    service = new ObserverService({ repository });
+    app = Fastify({ logger: false });
+    await registerObserverRoutes(app, service);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: "/api/observer/threads/retained-thread",
+    });
+
+    expect(detail.statusCode).toBe(200);
+    expect(detail.headers["cache-control"]).toBe("no-store");
+    expect(detail.json()).toMatchObject({
+      thread: { id: "retained-thread", title: "Retained offline work" },
+      activities: [{ sourceKey: "turn:retained-thread:turn-one:failed" }],
+      transientHistory: {
+        status: "unavailable",
+        reason: "Codex is disconnected; full history is unavailable.",
+      },
+    });
+    expect(detail.body).not.toContain("turns");
   });
 
   it("validates IDs and filters reporting exclusions at route boundaries", async () => {

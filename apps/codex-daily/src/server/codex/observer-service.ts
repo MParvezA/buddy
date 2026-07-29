@@ -4,7 +4,7 @@ import type {
   ObserverConnectionHealth,
   ObserverMode,
   ObserverSnapshot,
-  TransientThreadDetail,
+  ThreadDetail,
 } from "../../shared/observer-types.js";
 import type { ObserverOperationalDiagnostics } from "../../shared/operations.js";
 import { ObserverRepository } from "../storage/observer-repository.js";
@@ -175,31 +175,54 @@ export class ObserverService extends EventEmitter {
     return { id: String(++this.eventSequence), snapshot: this.snapshot() };
   }
 
-  async detail(threadId: string): Promise<TransientThreadDetail> {
+  async detail(threadId: string): Promise<ThreadDetail> {
     if (this.repository.isExcluded(threadId)) {
       throw new ObserverNotFoundError("The observed thread was not found.");
     }
     const stored = this.repository.findThread(threadId);
     if (!stored) throw new ObserverNotFoundError("The observed thread was not found.");
-    if (!this.client || this.health.state !== "connected") {
-      throw new ObserverUnavailableError("Codex is not connected for transient detail.");
-    }
-    const result = await this.client.request("thread/read", {
-      threadId,
-      includeTurns: true,
-    });
-    const rawThread = assertThreadReadResponse(result);
-    if (rawThread.id !== threadId || !Array.isArray(rawThread.turns)) {
-      throw new Error("Codex App Server thread/read response is invalid.");
-    }
-    return {
+    const retained = {
       thread: stored,
       activities: this.repository.listActivitiesForThread(threadId),
-      // This is intentionally the sole pass-through of sensitive protocol content.
-      // No repository method accepts it and snapshot/SSE DTOs cannot contain it.
-      turns: rawThread.turns,
-      fetchedAt: this.clock().toISOString(),
     };
+    if (!this.client || this.health.state !== "connected") {
+      return {
+        ...retained,
+        transientHistory: {
+          status: "unavailable",
+          reason: "Codex is disconnected; full history is unavailable.",
+        },
+      };
+    }
+    try {
+      const result = await this.client.request("thread/read", {
+        threadId,
+        includeTurns: true,
+      });
+      const rawThread = assertThreadReadResponse(result);
+      if (rawThread.id !== threadId || !Array.isArray(rawThread.turns)) {
+        throw new Error("Codex App Server thread/read response is invalid.");
+      }
+      return {
+        ...retained,
+        transientHistory: {
+          status: "available",
+          // This is intentionally the sole pass-through of sensitive protocol
+          // content. No repository method accepts it and snapshot/SSE DTOs
+          // cannot contain it.
+          turns: rawThread.turns,
+          fetchedAt: this.clock().toISOString(),
+        },
+      };
+    } catch {
+      return {
+        ...retained,
+        transientHistory: {
+          status: "unavailable",
+          reason: "Full history could not be fetched from Codex right now.",
+        },
+      };
+    }
   }
 
   async ensureReportingThread(

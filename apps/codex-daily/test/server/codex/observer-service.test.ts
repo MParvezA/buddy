@@ -51,7 +51,8 @@ describe("ObserverService", () => {
     });
 
     const detail = await service.detail("thread-one");
-    expect(JSON.stringify(detail.turns)).toContain("SECRET RESPONSE");
+    expect(detail.transientHistory.status).toBe("available");
+    expect(JSON.stringify(detail.transientHistory)).toContain("SECRET RESPONSE");
     const dump = JSON.stringify({
       threads: repository.listThreads(),
       activities: repository.listActivities(),

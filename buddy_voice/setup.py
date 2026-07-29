@@ -22,6 +22,8 @@ setup(
     entry_points={
         'console_scripts': [
             'voice_input = buddy_voice.voice_node:main',
+            'terminal_ptt = buddy_voice.terminal_ptt:main',
+            'local_speak_server = buddy_voice.local_speak:main',
             'speak_server = buddy_voice.speak_node:main',
         ],
     },

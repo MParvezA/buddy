@@ -17,6 +17,9 @@ from rclpy.signals import SignalHandlerOptions
 
 from .providers import (
     FakeTextToSpeechProvider,
+    SpeechPlaybackCancelled,
+    SpeechPlaybackError,
+    SpeechPlaybackTimeout,
     SpeechSynthesisCancelled,
     SpeechSynthesisError,
     SpeechSynthesisTimeout,
@@ -29,6 +32,7 @@ VOICE_ERROR_EMPTY_TEXT = 1000
 VOICE_ERROR_SYNTHESIS = 1001
 VOICE_ERROR_SYNTHESIS_TIMEOUT = 1002
 VOICE_ERROR_PLAYBACK_TIMEOUT = 1003
+VOICE_ERROR_PLAYBACK = 1004
 VOICE_ACTIVE_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 VOICE_EXECUTOR_DRAIN_TIMEOUT_SECONDS = 0.25
 VOICE_WORKER_JOIN_TIMEOUT_SECONDS = 0.25
@@ -227,6 +231,45 @@ class BuddySpeakNode(Node):
                 VOICE_ERROR_SYNTHESIS,
                 f'unexpected speech provider failure: {error}',
             )
+        # Native providers return a temporary WAV.  Its playback is a distinct
+        # operation: synthesis success is never reported as audible success.
+        if getattr(speech, 'audio_path', None) is not None:
+            try:
+                self._feedback(goal_handle, Speak.Feedback.STATE_SPEAKING, 0.0, 'speaking')
+                self._text_to_speech.play(
+                    speech,
+                    cancel_event=cancel_event,
+                    deadline_monotonic=time.monotonic() + self._playback_timeout_seconds,
+                )
+            except SpeechPlaybackCancelled as error:
+                if goal_handle.is_cancel_requested:
+                    return self._cancelled_result(goal_handle, result, str(error), speech)
+                return self._failed_result(
+                    goal_handle, result, VOICE_ERROR_PLAYBACK, str(error), speech)
+            except SpeechPlaybackTimeout as error:
+                return self._failed_result(
+                    goal_handle, result, VOICE_ERROR_PLAYBACK_TIMEOUT, str(error), speech)
+            except SpeechPlaybackError as error:
+                return self._failed_result(
+                    goal_handle, result, VOICE_ERROR_PLAYBACK, str(error), speech)
+            finally:
+                # Playback cancellation and every failure path must discard the
+                # native WAV before the action result is returned.
+                self._text_to_speech.cleanup(speech)
+            if goal_handle.is_cancel_requested:
+                return self._cancelled_result(goal_handle, result, 'speech playback cancelled', speech)
+            if cancel_event.is_set():
+                return self._failed_result(
+                    goal_handle, result, VOICE_ERROR_PLAYBACK,
+                    'speech playback interrupted during node shutdown', speech)
+            goal_handle.succeed()
+            result.outcome = Speak.Result.OUTCOME_SUCCEEDED
+            result.audio_duration = _duration_message(speech.duration_seconds)
+            result.message = 'speech playback completed'
+            return result
+
+        # Deterministic fake providers intentionally retain their original
+        # timer-based playback model so simulation stays dependency-free.
         playback_deadline = time.monotonic() + self._playback_timeout_seconds
         for step in range(self._playback_steps):
             if goal_handle.is_cancel_requested:

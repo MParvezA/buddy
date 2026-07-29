@@ -88,9 +88,10 @@ After monitoring resumes, current thread metadata can be rediscovered.
 
 ## Troubleshooting
 
-- **Observer disconnected:** the plan and reports remain usable. Confirm that
-  `codex` is on `PATH`, or set `CODEX_DAILY_CODEX_PATH`. For shared live events,
-  confirm the operator-managed proxy is available.
+- **Observer disconnected:** the plan, reports, and retained normalized thread
+  facts remain usable; only transient full chat history is unavailable. Confirm
+  that `codex` is on `PATH`, or set `CODEX_DAILY_CODEX_PATH`. For shared live
+  events, confirm the operator-managed proxy is available.
 - **Approvals/questions are absent:** `standalone_history` cannot observe live
   requests owned by another Codex process.
 - **Automatic report did not run:** inspect scheduler diagnostics in Settings.

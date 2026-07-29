@@ -10,6 +10,7 @@ import time
 
 from buddy_brain.dialogue_core import DialogueCore
 from buddy_brain.model_provider import (
+    _RESPONSE_JSON_SCHEMA,
     build_qwen_prompt,
     extract_one_json_object,
     LlamaCppConfig,
@@ -82,6 +83,13 @@ def test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object():
             "assert '--reasoning-budget' in sys.argv\n"
             "assert sys.argv[sys.argv.index('--reasoning-budget') + 1] == '0'\n"
             "assert '--json-schema' in sys.argv\n"
+            "assert '--simple-io' in sys.argv\n"
+            "assert '--log-disable' in sys.argv\n"
+            "assert '--no-show-timings' in sys.argv\n"
+            "assert '--no-conversation' in sys.argv\n"
+            "assert '--single-turn' in sys.argv\n"
+            "assert '--no-jinja' in sys.argv\n"
+            "assert '--no-display-prompt' in sys.argv\n"
             'print(\'llama.cpp: framing {"kind":"clarification",'
             '"question":"What room?"}\')\n',
         )
@@ -93,8 +101,35 @@ def test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object():
             provider.shutdown()
         assert response == '{"kind":"clarification","question":"What room?"}'
         command = provider._command("prompt with ; $(not-a-shell)")
-        assert command[0] == str(binary)
-        assert command[-1] == "prompt with ; $(not-a-shell)"
+        assert command == [
+            str(binary),
+            "--model",
+            str(model),
+            "--threads",
+            "3",
+            "--ctx-size",
+            "4096",
+            "--n-predict",
+            "256",
+            "--temp",
+            "0.1",
+            "--gpu-layers",
+            "0",
+            "--reasoning-budget",
+            "0",
+            "--json-schema",
+            _RESPONSE_JSON_SCHEMA,
+            "--simple-io",
+            "--log-disable",
+            "--no-show-timings",
+            "--no-conversation",
+            "--single-turn",
+            "--no-jinja",
+            "--no-warmup",
+            "--no-display-prompt",
+            "--prompt",
+            "prompt with ; $(not-a-shell)",
+        ]
 
 
 def test_qwen_prompt_and_extraction_do_not_repair_schema_invalid_content():

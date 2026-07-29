@@ -46,6 +46,19 @@ alignment live here. Feature-specific behavior remains in its pipeline documents
 - Applied example: every Codex Daily evening report exists as a factual
   reconciliation before an optional narrative is generated.
 
+## Generated Operational Briefs
+
+- Structure generated orientation into current state, reported progress, suggested
+  operator actions, and blockers instead of one undifferentiated AI paragraph.
+- Label generated content with provenance, confidence, freshness, and lifecycle so
+  it cannot be mistaken for recorded fact or user confirmation.
+- Keep the last good brief visible as stale when refresh is pending or fails.
+- Generated actions remain suggestions and must not silently enter deterministic
+  attention, planning, or completion workflows.
+- Applied example: Codex Daily summarizes the 10 most recent sessions while
+  retaining factual session metadata and operator ownership.
+
 ## Validated Source Families
 
 - `docs/pipeline/2026-07-29-10-15-codex-daily/2_alignment.md`
+- `docs/pipeline/2026-07-29-16-04-session-briefs/2_alignment.md`

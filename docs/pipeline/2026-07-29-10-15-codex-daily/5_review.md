@@ -220,3 +220,53 @@ Correction verification:
 
 Next action: commit the correction implementation and repeat `5_Review` against
 that exact commit before cleanup.
+
+## Repeat Review
+
+Status: review-failed
+Reviewed correction commit: `156b3f8323712debce2d3701ee253357c04ade79`
+Next action: return to `4_Implement` for the two coupled thread-detail findings
+below, then repeat this review.
+
+The original R1–R9 findings and bounded should-fix list are materially corrected.
+Independent server and client reviews nevertheless reproduced one cached-data
+regression in the new per-thread timeline, plus an adjacent retention bound that
+still violates the source-event visibility contract.
+
+### RR1 — Keep retained thread facts available while Codex is disconnected
+
+`ObserverService.detail()` rejects before reading retained activities when the
+App Server is disconnected. `ThreadDetailPage` now reads its normalized timeline
+only from that detail response, so it reports an empty retained timeline even
+though SQLite and the observer snapshot still contain the facts.
+
+- Evidence: an isolated probe at the reviewed commit retained one activity in
+  both the snapshot and repository, while `detail()` returned
+  `Codex is not connected for transient detail.`
+- Required correction: decouple locally retained thread metadata/activity from
+  the optional live transcript fetch. The page must display retained facts
+  offline and truthfully describe live transcript unavailability.
+
+### RR2 — Do not hide an attention source behind an arbitrary per-thread cap
+
+`listActivitiesForThread()` caps the timeline at 1,000 rows. A reproduced
+1,001-event thread hid the oldest approval source even though it remained stored,
+contradicting the aligned requirement that acknowledged or dismissed attention
+sources remain visible in thread detail.
+
+- Required correction: return the complete retained per-thread normalized
+  timeline, or otherwise guarantee that attention-source activities are always
+  included and visible beyond the ordinary recent-activity window.
+
+Repeat-review verification:
+
+- `npm run check`: passed; 30 files and 96 tests.
+- `npm run test:e2e`: passed against the exact commit; 16 passed and 6
+  intentional mobile mutation duplicates skipped.
+- Isolated report-regeneration scenario: passed from fresh state.
+- Repository contracts: 4 passed; `colcon list`: unchanged 16 packages.
+- `git diff --check d3f0185^..156b3f8`: passed.
+- Protected `buddy_*` and `docs/contracts` diff: empty.
+
+Decision: revise RR1 and RR2 before cleanup. Existing accepted deviations remain
+unchanged.

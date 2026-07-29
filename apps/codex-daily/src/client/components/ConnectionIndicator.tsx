@@ -1,25 +1,22 @@
+import type { ObserverConnectionHealth } from "../../shared/observer-types";
+
 interface ConnectionIndicatorProps {
-  serviceAvailable: boolean | null;
+  health: ObserverConnectionHealth | null;
 }
 
-export function ConnectionIndicator({ serviceAvailable }: ConnectionIndicatorProps) {
-  const title =
-    serviceAvailable === null
-      ? "Checking local service"
-      : serviceAvailable
-        ? "Codex not connected"
-        : "Local service unavailable";
-  const detail =
-    serviceAvailable === false
-      ? "Today’s local surface may be unavailable."
-      : "Local planning · monitoring starts in a later slice";
-
+export function ConnectionIndicator({ health }: ConnectionIndicatorProps) {
+  const title = health ? `Codex ${health.state}` : "Checking Codex observer";
+  const detail = health
+    ? health.capability === "standalone_history"
+      ? "History polling · live coverage is limited"
+      : "Shared live observer"
+    : "Local planning remains available";
   return (
     <div className="connection-indicator" role="status" aria-live="polite">
-      <span className={`connection-dot ${serviceAvailable ? "is-demo" : ""}`} aria-hidden="true" />
+      <span className={`connection-dot ${health?.state === "connected" ? "is-live" : ""}`} aria-hidden="true" />
       <span>
         <strong>{title}</strong>
-        <small>{detail}</small>
+        <small>{health?.diagnostic ?? detail}</small>
       </span>
     </div>
   );

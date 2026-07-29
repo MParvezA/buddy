@@ -21,7 +21,10 @@ describe("planning database", () => {
     const applied = database.connection
       .prepare("SELECT version FROM schema_migrations")
       .all() as { version: string }[];
-    expect(applied).toEqual([{ version: "001_morning_planning.sql" }]);
+    expect(applied).toEqual([
+      { version: "001_morning_planning.sql" },
+      { version: "002_codex_observer.sql" },
+    ]);
     expect(() =>
       database.connection
         .prepare(`

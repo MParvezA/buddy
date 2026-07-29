@@ -4,14 +4,60 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { representativeDay } from "../server/representative-day";
 import type { HealthResponse } from "../shared/dashboard";
+import type { ObserverSnapshot } from "../shared/observer-types";
 import type { PlanningView } from "../shared/planning";
 import { App } from "./App";
 
 const health: HealthResponse = {
   service: "codex-daily",
   status: "ok",
-  mode: "representative",
-  connection: "not-connected",
+  mode: "observer",
+  connection: {
+    state: "connected",
+    capability: "standalone_history",
+    diagnostic: null,
+  },
+};
+const observer: ObserverSnapshot = {
+  health: {
+    state: "connected",
+    capability: "standalone_history",
+    lastSuccessfulSyncAt: "2026-07-29T12:00:00.000Z",
+    lastInventoryRefreshAt: "2026-07-29T12:00:00.000Z",
+    diagnostic: null,
+  },
+  threads: [
+    {
+      id: "onboarding-refresh",
+      sessionId: "session-onboarding",
+      title: "Onboarding refresh",
+      cwd: "/workspace/onboarding",
+      source: "vscode",
+      cliVersion: "0.146.0",
+      createdAt: "2026-07-29T08:00:00.000Z",
+      updatedAt: "2026-07-29T12:00:00.000Z",
+      recencyAt: "2026-07-29T12:00:00.000Z",
+      archived: false,
+      lastObservedAt: "2026-07-29T12:00:00.000Z",
+      runtime: "active",
+      waitingOnApproval: false,
+      waitingOnUserInput: false,
+      lastActivityAt: "2026-07-29T12:00:00.000Z",
+    },
+  ],
+  activities: [
+    {
+      sourceKey: "turn:onboarding-refresh:turn-1:completed",
+      threadId: "onboarding-refresh",
+      turnId: "turn-1",
+      itemId: null,
+      occurredAt: "2026-07-29T12:00:00.000Z",
+      category: "turn",
+      lifecycle: "completed",
+      label: "Turn completed",
+    },
+  ],
+  taskLinks: [],
 };
 const planning: PlanningView = {
   localDate: "2026-07-29",
@@ -51,6 +97,16 @@ function mockSuccessfulApi() {
       if (url === "/api/health") return Promise.resolve(jsonResponse(health));
       if (url === "/api/day") return Promise.resolve(jsonResponse(representativeDay));
       if (url === "/api/planning") return Promise.resolve(jsonResponse(planning));
+      if (url === "/api/observer") return Promise.resolve(jsonResponse(observer));
+      if (url === "/api/observer/threads/onboarding-refresh") {
+        return Promise.resolve(
+          jsonResponse({
+            thread: observer.threads[0],
+            turns: [{ id: "turn-1" }],
+            fetchedAt: "2026-07-29T12:01:00.000Z",
+          }),
+        );
+      }
       return Promise.resolve(jsonResponse({ error: "Not found" }, { status: 404 }));
     }),
   );
@@ -113,7 +169,7 @@ describe("daily dashboard", () => {
   it("shows durable outcomes as open until the operator confirms them", async () => {
     renderApp();
 
-    expect(await screen.findByText("Ship the morning plan")).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Ship the morning plan" })).toBeVisible();
     expect(screen.getByText("Open")).toBeVisible();
     expect(screen.getByRole("button", { name: "Confirm complete" })).toBeVisible();
     expect(screen.queryByText("Operator confirmed complete")).not.toBeInTheDocument();
@@ -125,6 +181,7 @@ describe("daily dashboard", () => {
       vi.fn((input: RequestInfo | URL) => {
         if (String(input) === "/api/health") return Promise.resolve(jsonResponse(health));
         if (String(input) === "/api/planning") return Promise.resolve(jsonResponse(planning));
+        if (String(input) === "/api/observer") return Promise.resolve(jsonResponse(observer));
         return Promise.resolve(jsonResponse({ error: "Unavailable" }, { status: 503 }));
       }),
     );
@@ -151,9 +208,9 @@ describe("secondary navigation", () => {
     expect(screen.getByText("Metadata only")).toBeVisible();
 
     await user.click(screen.getByRole("link", { name: "Today" }));
-    await user.click(screen.getByRole("link", { name: "Onboarding refresh" }));
+    await user.click(screen.getAllByRole("link", { name: "Onboarding refresh" })[0]);
     expect(screen.getByRole("heading", { name: "Onboarding refresh" })).toBeVisible();
-    expect(screen.getByText(/Full chat transcripts are not retained/)).toBeVisible();
+    expect(screen.getByText(/Full history is fetched from Codex/)).toBeVisible();
 
     await user.click(screen.getByRole("link", { name: /Back to Today/ }));
     await waitFor(() =>

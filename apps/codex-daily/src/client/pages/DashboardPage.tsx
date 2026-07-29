@@ -24,8 +24,8 @@ export function DashboardPage() {
         </div>
         <div className="demo-stamp">
           <span aria-hidden="true">◇</span>
-          Local daily plan
-          <small>Monitoring preview remains representative</small>
+          Local daily monitor
+          <small>Codex metadata · read-only</small>
         </div>
       </header>
 
@@ -33,7 +33,7 @@ export function DashboardPage() {
         <div className="state-panel" role="status">
           <span className="loading-ring" aria-hidden="true" />
           <h2>Loading your day</h2>
-          <p>Reading the representative snapshot from the local service.</p>
+          <p>Reading today’s local plan and dashboard facts.</p>
         </div>
       )}
 

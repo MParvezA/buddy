@@ -61,10 +61,15 @@ test("prior-day review unlocks a durable operator-owned morning plan", async ({
   await page
     .getByRole("button", { name: "Move Verify the local workflow up" })
     .click();
-  const titles = await page.locator(".durable-outcome h3").allTextContents();
-  expect(titles.indexOf("Verify the local workflow")).toBeLessThan(
-    titles.indexOf("Publish the daily monitor"),
-  );
+  await expect
+    .poll(async () => {
+      const titles = await page.locator(".durable-outcome h3").allTextContents();
+      return (
+        titles.indexOf("Verify the local workflow") <
+        titles.indexOf("Publish the daily monitor")
+      );
+    })
+    .toBe(true);
 
   await publish.getByRole("button", { name: "Confirm complete" }).click();
   await expect(publish.getByText("Operator confirmed complete")).toBeVisible();
@@ -72,7 +77,7 @@ test("prior-day review unlocks a durable operator-owned morning plan", async ({
   await expect(publish.getByText("Open", { exact: true })).toBeVisible();
 
   await page.reload();
-  await expect(page.getByText("Publish the daily monitor")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Publish the daily monitor" })).toBeVisible();
   await expect(page.getByText("Include pending work and morning decisions")).toBeVisible();
   await expect(page.getByText("Operator confirmed complete")).toHaveCount(0);
 

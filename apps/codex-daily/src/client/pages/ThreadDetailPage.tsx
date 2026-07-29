@@ -1,61 +1,92 @@
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import type { TransientThreadDetail } from "../../shared/observer-types";
+import { getThreadDetail } from "../api/observer-client";
 import { StatusBadge } from "../components/StatusBadge";
-import { useDashboardData } from "../data/dashboard-context";
+import { useObserver } from "../data/observer-context";
 
 export function ThreadDetailPage() {
   const { threadId = "" } = useParams();
-  const { snapshot, loading, error } = useDashboardData();
+  const observer = useObserver();
+  const [detail, setDetail] = useState<TransientThreadDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const thread = observer.snapshot?.threads.find((item) => item.id === threadId) ?? null;
+  const activities =
+    observer.snapshot?.activities.filter((item) => item.threadId === threadId) ?? [];
 
-  const thread = snapshot?.activeThreads.find((item) => item.id === threadId);
-  const attention = snapshot?.attention.filter((item) => item.threadId === threadId) ?? [];
-  const completed = snapshot?.recentlyCompleted.filter((item) => item.threadId === threadId) ?? [];
-  const title =
-    thread?.title ??
-    (threadId
-      .split("-")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(" ") || "Thread detail");
+  useEffect(() => {
+    let active = true;
+    getThreadDetail(threadId)
+      .then((value) => {
+        if (active) setDetail(value);
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(reason instanceof Error ? reason.message : "Thread detail could not be read.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [threadId]);
 
   return (
     <article className="secondary-page">
       <Link className="back-link" to="/">← Back to Today</Link>
       <header className="page-header compact">
         <div>
-          <p className="eyebrow">Representative thread detail</p>
-          <h1>{title}</h1>
-          <p>Only normalized activity metadata is shown. Full chat transcripts are not retained.</p>
+          <p className="eyebrow">Transient Codex detail</p>
+          <h1>{thread?.title ?? "Untitled Codex chat"}</h1>
+          <p>
+            Full history is fetched from Codex for this request only. It is not stored or sent
+            through live dashboard events.
+          </p>
         </div>
-        {thread && <StatusBadge tone={thread.status}>{thread.statusLabel}</StatusBadge>}
+        {thread && (
+          <StatusBadge tone={thread.runtime === "active" ? "working" : "possibly-stale"}>
+            {thread.runtime.replace("_", " ")}
+          </StatusBadge>
+        )}
       </header>
 
-      {loading && <div className="state-panel" role="status">Loading representative metadata…</div>}
-      {error && <div className="state-panel error-state" role="alert">Thread metadata is unavailable.</div>}
-      {!loading && !error && (
+      {!thread && !observer.loading && (
+        <div className="state-panel error-state" role="alert">This observed thread was not found.</div>
+      )}
+      {thread && (
         <div className="detail-grid">
           <section className="panel">
             <p className="eyebrow">Current context</p>
-            <h2>Observed summary</h2>
-            <p className="lead-copy">
-              {thread?.summary ??
-                attention[0]?.detail ??
-                completed[0]?.fact ??
-                "This representative thread has no current activity summary."}
-            </p>
+            <h2>Observed metadata</h2>
             <dl className="metadata-list">
-              <div><dt>Source</dt><dd>Representative local fixture</dd></div>
-              <div><dt>Retention</dt><dd>Metadata only</dd></div>
+              <div><dt>Working directory</dt><dd>{thread.cwd}</dd></div>
+              <div><dt>Source</dt><dd>{thread.source}</dd></div>
+              <div><dt>CLI version</dt><dd>{thread.cliVersion}</dd></div>
+              <div><dt>Retention</dt><dd>Normalized metadata only</dd></div>
               <div><dt>Codex control</dt><dd>Read-only</dd></div>
+              <div>
+                <dt>Transient history</dt>
+                <dd>
+                  {error
+                    ? error
+                    : detail
+                      ? `${detail.turns.length} turns fetched in request memory`
+                      : "Reading from Codex…"}
+                </dd>
+              </div>
             </dl>
           </section>
           <aside className="panel quiet-panel">
             <p className="eyebrow">Activity signals</p>
-            <h2>What the dashboard knows</h2>
-            {attention.length === 0 && completed.length === 0 ? (
-              <p>No normalized attention or completion signals are shown for this preview.</p>
+            <h2>Normalized timeline</h2>
+            {activities.length === 0 ? (
+              <p>No normalized activity facts are retained for this thread yet.</p>
             ) : (
               <ul className="signal-list">
-                {attention.map((item) => <li key={item.id}>{item.label}: {item.title}</li>)}
-                {completed.map((item) => <li key={item.id}>Observed completion: {item.title}</li>)}
+                {activities.map((item) => (
+                  <li key={item.sourceKey}>
+                    {item.label} · <time dateTime={item.occurredAt}>{item.occurredAt}</time>
+                  </li>
+                ))}
               </ul>
             )}
           </aside>

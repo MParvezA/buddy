@@ -1,4 +1,6 @@
-export type ConnectionState = "not-connected";
+import type { ObserverHealthState, ObserverMode } from "./observer-types.js";
+
+export type ConnectionState = "not-connected" | ObserverHealthState;
 export type AttentionKind =
   | "approval"
   | "question"
@@ -11,8 +13,12 @@ export type ThreadStatus = "working" | "waiting" | "possibly-stale";
 export interface HealthResponse {
   service: "codex-daily";
   status: "ok";
-  mode: "representative";
-  connection: ConnectionState;
+  mode: "observer";
+  connection: {
+    state: ObserverHealthState;
+    capability: ObserverMode;
+    diagnostic: string | null;
+  };
 }
 
 export interface AttentionItem {

@@ -13,6 +13,12 @@ const app = await buildApp({
   databasePath: process.env.CODEX_DAILY_DB_PATH,
   timezone: process.env.CODEX_DAILY_TIMEZONE,
   clock,
+  observer: true,
+  observerMode:
+    process.env.CODEX_DAILY_OBSERVER_MODE === "shared_live"
+      ? "shared_live"
+      : "standalone_history",
+  codexExecutable: process.env.CODEX_DAILY_CODEX_PATH,
 });
 
 try {

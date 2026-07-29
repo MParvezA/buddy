@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import type { DashboardSnapshot } from "../../shared/dashboard";
 import { PlanningSection } from "../features/planning/PlanningSection";
+import { LiveWorkSections } from "../features/live-work/LiveWorkSections";
 import { StatusBadge } from "./StatusBadge";
 
 interface DashboardSectionsProps {
@@ -45,56 +46,7 @@ export function DashboardSections({ snapshot }: DashboardSectionsProps) {
 
       <PlanningSection />
 
-      <section className="panel" data-section-order="3" aria-labelledby="active-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Priority 03</p>
-            <h2 id="active-title">Active Codex chats</h2>
-          </div>
-          <span className="count-pill neutral">{snapshot.activeThreads.length} observed</span>
-        </div>
-        <ul className="work-grid">
-          {snapshot.activeThreads.map((thread) => (
-            <li key={thread.id} className="work-card">
-              <div className="card-meta">
-                <StatusBadge tone={thread.status}>{thread.statusLabel}</StatusBadge>
-                <time dateTime={thread.lastActivityAt}>
-                  {formatTime(thread.lastActivityAt, snapshot.timezone)}
-                </time>
-              </div>
-              <h3>
-                <Link to={`/threads/${thread.id}`}>{thread.title}</Link>
-              </h3>
-              <p>{thread.summary}</p>
-              {thread.isUnplanned && <StatusBadge tone="unplanned">Unplanned work</StatusBadge>}
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="panel" data-section-order="4" aria-labelledby="completed-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Priority 04</p>
-            <h2 id="completed-title">Recently completed work</h2>
-          </div>
-          <span className="section-hint">Observed facts, not task confirmation</span>
-        </div>
-        <ul className="completed-list">
-          {snapshot.recentlyCompleted.map((item) => (
-            <li key={item.id}>
-              <span className="completion-mark" aria-hidden="true">✓</span>
-              <div>
-                <h3>
-                  <Link to={`/threads/${item.threadId}`}>{item.title}</Link>
-                </h3>
-                <p>{item.fact}</p>
-              </div>
-              <time dateTime={item.completedAt}>{formatTime(item.completedAt, snapshot.timezone)}</time>
-            </li>
-          ))}
-        </ul>
-      </section>
+      <LiveWorkSections />
 
       <section className="panel report-panel" data-section-order="5" aria-labelledby="report-title">
         <div className="section-heading">

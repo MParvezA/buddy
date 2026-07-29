@@ -22,8 +22,12 @@ describe("local service", () => {
     expect(health.json<HealthResponse>()).toEqual({
       service: "codex-daily",
       status: "ok",
-      mode: "representative",
-      connection: "not-connected",
+      mode: "observer",
+      connection: {
+        state: "disconnected",
+        capability: "standalone_history",
+        diagnostic: null,
+      },
     });
     expect(day.statusCode).toBe(200);
     expect(day.json<DashboardSnapshot>()).toMatchObject({

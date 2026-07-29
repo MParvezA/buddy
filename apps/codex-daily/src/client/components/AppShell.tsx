@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { getHealth } from "../api/dashboard-client";
+import { useObserver } from "../data/observer-context";
 import { ConnectionIndicator } from "./ConnectionIndicator";
 
 const navigation = [
@@ -10,21 +9,7 @@ const navigation = [
 ];
 
 export function AppShell() {
-  const [serviceAvailable, setServiceAvailable] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    getHealth()
-      .then(() => {
-        if (active) setServiceAvailable(true);
-      })
-      .catch(() => {
-        if (active) setServiceAvailable(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const observer = useObserver();
 
   return (
     <div className="app-frame">
@@ -41,7 +26,7 @@ export function AppShell() {
             <small>Daily operations</small>
           </span>
         </NavLink>
-        <ConnectionIndicator serviceAvailable={serviceAvailable} />
+        <ConnectionIndicator health={observer.snapshot?.health ?? null} />
       </header>
 
       <div className="shell-grid">
@@ -64,7 +49,7 @@ export function AppShell() {
             <span aria-hidden="true">⌂</span>
             <p>
               <strong>Private by default</strong>
-              Planning stays in the local SQLite store.
+              Metadata only · no transcript mirroring.
             </p>
           </div>
         </nav>

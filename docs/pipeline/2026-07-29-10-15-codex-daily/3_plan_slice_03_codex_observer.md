@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 03: Codex Observer` (this status-bearing commit)
+Verification: `npm run check` passed with 11 files/33 tests; full Playwright passed repeatedly and independently (6 passed, 2 intentional duplicate mobile-flow skips); repository contracts passed 4/4; protected-path diff was empty; focused protocol/privacy tests proved content stripping, request-key isolation, repeated blocker episodes, reconnect, pagination, SSE, links, and exclusions.
+Deviations: The deterministic fake App Server uses Python because Node subprocess stdin was unreliable in this environment; production remains Node/TypeScript. A real-session smoke was skipped to avoid unnecessary transcript exposure. The full ROS matrix was not green in untouched packages (`buddy_task_executor`, `buddy_navigation`, and a hanging `buddy_bringup` run); narrowed repository-boundary verification passed.
+Follow-ups: None. FUP-001 through FUP-006 remain deferred.
 
 ## Context
 

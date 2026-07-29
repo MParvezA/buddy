@@ -4,8 +4,8 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Needs your attention" })).toBeVisible();
-  await expect(page.getByText("Codex not connected", { exact: true })).toBeVisible();
-  await expect(page.getByText("Local daily plan")).toBeVisible();
+  await expect(page.getByText("Codex connected", { exact: true })).toBeVisible();
+  await expect(page.getByText("Local daily monitor")).toBeVisible();
 
   const sectionHeadings = await page
     .locator('[data-testid="dashboard-sections"] > section > .section-heading h2')
@@ -28,10 +28,14 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
 
 test("built app routes through thread, report, settings, and back to Today", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Onboarding refresh" }).first().click();
-  await expect(page).toHaveURL(/\/threads\/onboarding-refresh$/);
-  await expect(page.getByRole("heading", { name: "Onboarding refresh" })).toBeVisible();
-  await expect(page.getByText(/Full chat transcripts are not retained/)).toBeVisible();
+  await page.getByRole("link", { name: "Observed chat" }).first().click();
+  await expect(page).toHaveURL(/\/threads\/thread-one$/);
+  await expect(
+    page
+      .locator("article.secondary-page")
+      .getByRole("heading", { level: 1, name: "Observed chat", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Full history is fetched from Codex/)).toBeVisible();
 
   await page.getByRole("link", { name: "Reports" }).click();
   await expect(page.getByRole("heading", { name: "Report history" })).toBeVisible();
@@ -39,7 +43,7 @@ test("built app routes through thread, report, settings, and back to Today", asy
 
   await page.getByRole("link", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByText("Metadata only")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Metadata only" })).toBeVisible();
 
   await page.getByRole("link", { name: "Back to Today" }).click();
   await expect(page).toHaveURL("/");

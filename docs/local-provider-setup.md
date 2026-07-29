@@ -122,9 +122,13 @@ Build Buddy:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
+colcon build --symlink-install \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 source install/setup.bash
 ```
+
+The explicit Python path avoids selecting an unrelated user-local Python that
+does not contain ROS 2's build modules.
 
 ## Prepare the WH-CH520
 

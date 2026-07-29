@@ -17,7 +17,7 @@ const MAX_CLARIFICATION = 2_000;
 export interface PlanningServiceOptions {
   repository: PlanningRepository;
   clock?: () => Date;
-  timezone?: string;
+  timezone?: string | (() => string);
 }
 
 function text(value: unknown, label: string, max: number, required: boolean): string | null {
@@ -40,12 +40,18 @@ function sameIds(left: string[], right: string[]): boolean {
 export class PlanningService {
   private readonly repository: PlanningRepository;
   private readonly clock: () => Date;
-  readonly timezone: string;
+  private readonly timezoneSource: string | (() => string);
 
   constructor(options: PlanningServiceOptions) {
     this.repository = options.repository;
     this.clock = options.clock ?? (() => new Date());
-    this.timezone = options.timezone ?? "Europe/Berlin";
+    this.timezoneSource = options.timezone ?? "Europe/Berlin";
+  }
+
+  get timezone(): string {
+    return typeof this.timezoneSource === "function"
+      ? this.timezoneSource()
+      : this.timezoneSource;
   }
 
   today(): string {
@@ -59,7 +65,7 @@ export class PlanningService {
   view(requestedDate?: string): PlanningView {
     const localDate = assertLocalDate(requestedDate ?? this.today());
     const priorDate = priorLocalDate(localDate);
-    this.repository.ensureDay(localDate, this.now());
+    this.repository.ensureDay(localDate, this.now(), this.timezone);
     const unresolvedTasks = this.repository.listUnresolved(priorDate);
     return {
       localDate,
@@ -90,6 +96,7 @@ export class PlanningService {
       title,
       clarification,
       position: this.repository.nextPosition(localDate),
+      timezone: this.timezone,
       now: this.now(),
     });
     return this.view(localDate);
@@ -204,6 +211,7 @@ export class PlanningService {
           clarification: source.clarification,
           position: this.repository.nextPosition(target),
           originTaskId: source.id,
+          timezone: this.timezone,
           now: this.now(),
         });
       }

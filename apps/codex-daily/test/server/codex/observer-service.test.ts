@@ -99,6 +99,54 @@ describe("ObserverService", () => {
       expect(service?.snapshot().health.state).toBe("reconnecting");
     });
     expect(service.snapshot().threads).toEqual([]);
+    expect(service.operationalDiagnostics()).toMatchObject({
+      reconnectAttempt: 1,
+      reconnectBackoffMs: expect.any(Number),
+      lastErrorCategory: "unavailable",
+      lastErrorAt: expect.any(String),
+    });
+    await service.stop();
+    expect(service.operationalDiagnostics()).toMatchObject({
+      state: "disconnected",
+      reconnectBackoffMs: expect.any(Number),
+    });
+  });
+
+  it("caps reconnect configuration and cancels scheduled work during shutdown", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const scheduled = new Set<ReturnType<typeof setTimeout>>();
+    const setTimer = ((callback: () => void, delay: number) => {
+      const timer = setTimeout(callback, delay);
+      scheduled.add(timer);
+      return timer;
+    }) as typeof setTimeout;
+    const clearTimer = ((timer: ReturnType<typeof setTimeout>) => {
+      scheduled.delete(timer);
+      clearTimeout(timer);
+    }) as typeof clearTimeout;
+    service = new ObserverService({
+      repository: new ObserverRepository(database.connection),
+      executable: "/definitely/not/a/codex-binary",
+      requestTimeoutMs: 100,
+      reconnectBaseMs: 1_000,
+      reconnectMaxMs: 2_000,
+      random: () => 0,
+      setTimer,
+      clearTimer,
+    });
+    await service.start();
+    await vi.waitFor(() => {
+      expect(service?.operationalDiagnostics().reconnectBackoffMs).toBe(800);
+    });
+    await service.stop();
+    expect(scheduled.size).toBe(0);
+    expect(() =>
+      new ObserverService({
+        repository: new ObserverRepository(database!.connection),
+        reconnectBaseMs: 500,
+        reconnectMaxMs: 300_001,
+      }),
+    ).toThrow(/capped/);
   });
 
   it("serializes overlapping inventory and creation and never projects the reporting thread", async () => {

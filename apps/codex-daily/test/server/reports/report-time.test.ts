@@ -32,4 +32,11 @@ describe("report timezone scheduling", () => {
     expect(() => assertReportTime("24:00")).toThrow(/HH:MM/);
     expect(() => assertTimezone("Mars/Olympus")).toThrow(/IANA/);
   });
+
+  it("maps another configured timezone to exact local-day boundaries", () => {
+    expect(reportDayBounds("2026-07-29", "America/New_York")).toEqual({
+      start: "2026-07-29T04:00:00.000Z",
+      end: "2026-07-30T04:00:00.000Z",
+    });
+  });
 });

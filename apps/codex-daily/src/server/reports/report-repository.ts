@@ -14,6 +14,7 @@ interface SnapshotRow {
   id: string;
   local_date: string;
   sequence: number;
+  timezone: string;
   trigger: ReportTrigger;
   cutoff_at: string;
   factual_digest_json: string;
@@ -82,6 +83,7 @@ export class ReportRepository {
     cutoff: string;
     trigger: ReportTrigger;
     narrativeRequested: boolean;
+    timezone?: string;
     now: string;
   }): ReportSnapshot {
     return this.transaction(() => {
@@ -101,9 +103,9 @@ export class ReportRepository {
         this.db
           .prepare(`
             INSERT INTO report_snapshots(
-              id, local_date, sequence, trigger, automatic_run_key,
+              id, local_date, sequence, trigger, automatic_run_key, timezone,
               cutoff_at, factual_digest_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             id,
@@ -111,6 +113,7 @@ export class ReportRepository {
             row.sequence,
             input.trigger,
             input.trigger === "manual" ? null : input.localDate,
+            input.timezone ?? this.getSchedule().timezone,
             input.cutoff,
             JSON.stringify(factualDigest),
             input.now,
@@ -327,6 +330,18 @@ export class ReportRepository {
     };
   }
 
+  timezoneForLocalDate(localDate: string, fallback: string): string {
+    const row = this.db
+      .prepare(`
+        SELECT timezone FROM days WHERE local_date = ?
+        UNION ALL
+        SELECT timezone FROM report_snapshots WHERE local_date = ?
+        LIMIT 1
+      `)
+      .get(localDate, localDate) as { timezone: string | null } | undefined;
+    return row?.timezone ?? fallback;
+  }
+
   updateSchedule(schedule: ReportSchedule, now: string): ReportSchedule {
     this.db
       .prepare(`
@@ -427,6 +442,7 @@ export class ReportRepository {
       id: row.id,
       localDate: row.local_date,
       sequence: row.sequence,
+      timezone: row.timezone,
       trigger: row.trigger,
       cutoff: row.cutoff_at,
       factualDigest: JSON.parse(row.factual_digest_json) as FactualDigest,

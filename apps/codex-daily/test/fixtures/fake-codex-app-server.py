@@ -3,6 +3,7 @@ import json
 import signal
 import threading
 import sys
+import os
 
 initialized = False
 reporting_thread_created = False
@@ -42,6 +43,7 @@ def send(value):
 
 
 shared_live = "proxy" in sys.argv
+method_log = os.environ.get("CODEX_DAILY_FAKE_METHOD_LOG")
 
 
 def live_fact():
@@ -144,6 +146,9 @@ signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if method_log and method:
+        with open(method_log, "a", encoding="utf-8") as handle:
+            handle.write(method + "\n")
     if method == "initialize":
         send(
             {

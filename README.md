@@ -17,6 +17,7 @@ slice.
 - [Frozen ROS contract](docs/contracts/README.md)
 - [Implementation status and limitations](docs/implementation-status.md)
 - [Integrated validation report](docs/validation-report.md)
+- [Codex Daily local operations dashboard](apps/codex-daily/README.md)
 
 ## Target environment
 

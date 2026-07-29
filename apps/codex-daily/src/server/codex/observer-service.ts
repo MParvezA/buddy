@@ -5,6 +5,7 @@ import type {
   ObserverSnapshot,
   TransientThreadDetail,
 } from "../../shared/observer-types.js";
+import type { ObserverOperationalDiagnostics } from "../../shared/operations.js";
 import { ObserverRepository } from "../storage/observer-repository.js";
 import {
   assertThreadListResponse,
@@ -60,6 +61,10 @@ export class ObserverService extends EventEmitter {
   private connecting = false;
   private eventSequence = 0;
   private diagnosticsIgnored = 0;
+  private diagnosticsReplayed = 0;
+  private reconnectBackoffMs: number | null = null;
+  private lastErrorCategory: string | null = null;
+  private lastErrorAt: string | null = null;
   private health: ObserverConnectionHealth;
   private reportingThreadCreationBuffer: ProtocolMethodEnvelope[] | null = null;
   private reportingThreadCreation: Promise<string> | null = null;
@@ -85,6 +90,17 @@ export class ObserverService extends EventEmitter {
     }
     this.reconnectBaseMs = options.reconnectBaseMs ?? 500;
     this.reconnectMaxMs = options.reconnectMaxMs ?? 30_000;
+    if (
+      !Number.isFinite(this.reconnectBaseMs) ||
+      !Number.isFinite(this.reconnectMaxMs) ||
+      this.reconnectBaseMs <= 0 ||
+      this.reconnectMaxMs <= 0 ||
+      this.reconnectMaxMs > 300_000
+    ) {
+      throw new Error(
+        "Reconnect timing must be positive and capped at 300000 milliseconds.",
+      );
+    }
     this.random = options.random ?? Math.random;
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
@@ -124,6 +140,19 @@ export class ObserverService extends EventEmitter {
       threads: this.repository.listThreads(),
       activities: this.repository.listActivities(),
       taskLinks: this.repository.listLinks(),
+    };
+  }
+
+  operationalDiagnostics(): ObserverOperationalDiagnostics {
+    return {
+      state: this.health.state,
+      lastSuccessfulSyncAt: this.health.lastSuccessfulSyncAt,
+      reconnectAttempt: this.reconnectAttempt,
+      reconnectBackoffMs: this.reconnectBackoffMs,
+      lastErrorCategory: this.lastErrorCategory,
+      lastErrorAt: this.lastErrorAt,
+      replayedEventCount: this.diagnosticsReplayed,
+      ignoredEventCount: this.diagnosticsIgnored,
     };
   }
 
@@ -347,6 +376,7 @@ export class ObserverService extends EventEmitter {
       if (failed || this.stopped || this.client !== client) return;
       const syncedAt = this.clock().toISOString();
       this.reconnectAttempt = 0;
+      this.reconnectBackoffMs = null;
       this.health = {
         ...this.health,
         state: "connected",
@@ -406,7 +436,7 @@ export class ObserverService extends EventEmitter {
           const previous = this.repository.findThread(thread.id);
           thread.lastActivityAt = previous?.lastActivityAt ?? thread.updatedAt;
           if (!this.repository.upsertThread(thread)) continue;
-          this.repository.addActivity({
+          this.addActivity({
             sourceKey: `thread:${thread.id}:inventory:${thread.updatedAt}:${Number(archived)}`,
             threadId: thread.id,
             turnId: null,
@@ -467,7 +497,7 @@ export class ObserverService extends EventEmitter {
       changed = true;
     }
     if (normalized.activity) {
-      changed = this.repository.addActivity(normalized.activity) || changed;
+      changed = this.addActivity(normalized.activity) || changed;
     }
     if (normalized.unknown) this.diagnosticsIgnored += 1;
     if (changed) this.publish();
@@ -501,6 +531,8 @@ export class ObserverService extends EventEmitter {
     await client.stop();
     if (this.stopped) return;
     this.reconnectAttempt += 1;
+    this.lastErrorCategory = this.errorCategory(error);
+    this.lastErrorAt = this.clock().toISOString();
     this.health = {
       ...this.health,
       state: "reconnecting",
@@ -512,6 +544,7 @@ export class ObserverService extends EventEmitter {
       this.reconnectBaseMs * 2 ** Math.max(0, this.reconnectAttempt - 1),
     );
     const delay = Math.round(base * (0.8 + this.random() * 0.4));
+    this.reconnectBackoffMs = delay;
     this.reconnectTimer = this.setTimer(() => {
       this.reconnectTimer = null;
       void this.connect();
@@ -527,6 +560,21 @@ export class ObserverService extends EventEmitter {
       return "The operator-managed shared App Server is unavailable.";
     }
     return "The local Codex App Server is unavailable; cached activity remains visible.";
+  }
+
+  private errorCategory(error: Error): string {
+    if (error.message.includes("timed out")) return "timeout";
+    if (error.message.includes("invalid") || error.message.includes("malformed")) {
+      return "protocol";
+    }
+    return "unavailable";
+  }
+
+  private addActivity(activity: Parameters<ObserverRepository["addActivity"]>[0]): boolean {
+    const replayed = this.repository.activityExists(activity.sourceKey);
+    const changed = this.repository.addActivity(activity);
+    if (replayed) this.diagnosticsReplayed += 1;
+    return changed;
   }
 
   private publish(): void {

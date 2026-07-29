@@ -64,6 +64,7 @@ export interface ReportSnapshot {
   id: string;
   localDate: string;
   sequence: number;
+  timezone: string;
   trigger: ReportTrigger;
   cutoff: string;
   factualDigest: FactualDigest;

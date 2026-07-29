@@ -5,7 +5,7 @@ export function NotFoundPage() {
     <div className="state-panel">
       <span className="state-symbol" aria-hidden="true">404</span>
       <h1>That local view does not exist</h1>
-      <p>The daily dashboard and its representative data are still available.</p>
+      <p>Your retained daily plan and observed work are still available.</p>
       <Link className="secondary-button link-button" to="/">Return to Today</Link>
     </div>
   );

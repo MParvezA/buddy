@@ -103,6 +103,45 @@ describe("report service", () => {
     });
   });
 
+  it("uses the retained day timezone after a mid-day preference change", async () => {
+    const { repository, service } = setup();
+    database!.connection
+      .prepare("UPDATE days SET timezone = 'Europe/Berlin' WHERE id = 'day'")
+      .run();
+    database!.connection.exec(`
+      INSERT INTO observed_threads(
+        id, session_id, title, cwd, source, cli_version, created_at, updated_at,
+        recency_at, archived, last_observed_at, runtime, waiting_on_approval,
+        waiting_on_user_input, last_activity_at
+      ) VALUES (
+        'timezone-thread', 'timezone-session', 'Timezone work', '/workspace',
+        'cli', '1', '2026-07-29T00:00:00.000Z', '2026-07-29T00:00:00.000Z',
+        '2026-07-29T00:00:00.000Z', 0, '2026-07-29T00:00:00.000Z',
+        'idle', 0, 0, '2026-07-29T00:00:00.000Z'
+      );
+      INSERT INTO observed_activities(
+        source_key, thread_id, turn_id, item_id, occurred_at, category, lifecycle, label
+      ) VALUES (
+        'timezone-activity', 'timezone-thread', NULL, NULL,
+        '2026-07-29T00:00:00.000Z', 'turn', 'completed', 'Turn completed'
+      );
+    `);
+    service.updateSchedule({
+      time: "18:00",
+      timezone: "America/New_York",
+      narrativeEnabled: false,
+    });
+
+    const snapshot = await service.generate("2026-07-29");
+
+    expect(repository.findSnapshot(snapshot!.id)).toMatchObject({
+      timezone: "Europe/Berlin",
+      factualDigest: {
+        unplannedWork: [{ threadId: "timezone-thread" }],
+      },
+    });
+  });
+
   it("rejects retry while the snapshot narrative is pending", async () => {
     const { repository, service } = setup();
     const snapshot = repository.createSnapshot({

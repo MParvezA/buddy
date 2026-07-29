@@ -1,10 +1,25 @@
-import { type FormEvent, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "react-router-dom";
 import type { ReportSchedule, ReportSchedulerState } from "../../shared/report";
+import {
+  DELETE_ALL_CONFIRMATION,
+  type OperationsDiagnostics,
+} from "../../shared/operations";
 import {
   getReportSettings,
   saveReportSettings,
 } from "../api/report-client";
+import {
+  deleteAllLocalData,
+  deleteLocalDay,
+  getOperationsDiagnostics,
+} from "../api/operations-client";
 
 const defaults: ReportSchedule = {
   time: "18:00",
@@ -17,6 +32,16 @@ export function SettingsPage() {
   const [state, setState] = useState<ReportSchedulerState | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<OperationsDiagnostics | null>(null);
+  const [operationsError, setOperationsError] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<"day" | "all" | null>(null);
+  const [deleteDate, setDeleteDate] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const deleteDayButton = useRef<HTMLButtonElement>(null);
+  const deleteAllButton = useRef<HTMLButtonElement>(null);
+  const confirmationInput = useRef<HTMLInputElement>(null);
+  const dialogElement = useRef<HTMLDivElement>(null);
   useEffect(() => {
     getReportSettings()
       .then((result) => {
@@ -26,7 +51,20 @@ export function SettingsPage() {
       .catch((reason: unknown) =>
         setError(reason instanceof Error ? reason.message : "Settings could not load."),
       );
+    getOperationsDiagnostics()
+      .then((result) => {
+        setDiagnostics(result);
+        setDeleteDate(result.retainedDates.newest ?? "");
+      })
+      .catch((reason: unknown) =>
+        setOperationsError(
+          reason instanceof Error ? reason.message : "Diagnostics could not load.",
+        ),
+      );
   }, []);
+  useEffect(() => {
+    if (dialog) confirmationInput.current?.focus();
+  }, [dialog]);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setStatus(null);
@@ -40,6 +78,61 @@ export function SettingsPage() {
       setError(reason instanceof Error ? reason.message : "Settings could not be saved.");
     }
   }
+  function openDialog(kind: "day" | "all") {
+    setConfirmation("");
+    setOperationsError(null);
+    setDialog(kind);
+  }
+  function closeDialog() {
+    const opener = dialog === "day" ? deleteDayButton : deleteAllButton;
+    setDialog(null);
+    setConfirmation("");
+    window.setTimeout(() => opener.current?.focus(), 0);
+  }
+  async function confirmDeletion(event: FormEvent) {
+    event.preventDefault();
+    if (!dialog) return;
+    setDeleting(true);
+    setOperationsError(null);
+    try {
+      if (dialog === "day") {
+        await deleteLocalDay(deleteDate, confirmation);
+      } else {
+        await deleteAllLocalData(confirmation);
+      }
+      window.location.reload();
+    } catch (reason) {
+      setOperationsError(
+        reason instanceof Error ? reason.message : "Local data could not be deleted.",
+      );
+      setDeleting(false);
+    }
+  }
+  function handleDialogKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const controls = Array.from(
+      dialogElement.current?.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), input:not([disabled]), a[href]",
+      ) ?? [],
+    );
+    if (!controls.length) return;
+    const first = controls[0];
+    const last = controls.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+  const expectedConfirmation =
+    dialog === "day" ? `DELETE ${deleteDate}` : DELETE_ALL_CONFIRMATION;
   return (
     <article className="secondary-page">
       <Link className="back-link" to="/">← Back to Today</Link>
@@ -100,6 +193,191 @@ export function SettingsPage() {
           <span className="read-only-label">Read-only ordinary chats</span>
         </section>
       </div>
+      <section className="panel operations-panel" aria-labelledby="local-data-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Local-only operations</p>
+            <h2 id="local-data-title">Inspect and manage retained data</h2>
+          </div>
+          <a className="secondary-button button-link" href="/api/operations/export" download>
+            Export JSON
+          </a>
+        </div>
+        <p>
+          This export contains Codex Daily plans and normalized metadata only—never
+          transcript bodies, credentials, or raw App Server payloads.
+        </p>
+        {operationsError && <p className="inline-notice" role="alert">{operationsError}</p>}
+        {!diagnostics && !operationsError && <p role="status">Loading local diagnostics…</p>}
+        {diagnostics && (
+          <>
+            <dl className="diagnostics-grid">
+              <Diagnostic label="Data location" value={diagnostics.dataLocation} />
+              <Diagnostic
+                label="Database"
+                value={`${diagnostics.database.status}; schema ${
+                  diagnostics.database.schemaVersion ?? "unknown"
+                }; ${diagnostics.database.foreignKeyViolations} foreign-key violations`}
+              />
+              <Diagnostic
+                label="Retained dates"
+                value={
+                  diagnostics.retainedDates.oldest
+                    ? `${diagnostics.retainedDates.oldest} – ${diagnostics.retainedDates.newest}`
+                    : "No retained dates"
+                }
+              />
+              <Diagnostic
+                label="Observer"
+                value={`${diagnostics.observer.state}; last sync ${formatTime(
+                  diagnostics.observer.lastSuccessfulSyncAt,
+                )}`}
+              />
+              <Diagnostic
+                label="Reconnect"
+                value={`attempt ${diagnostics.observer.reconnectAttempt}; backoff ${
+                  diagnostics.observer.reconnectBackoffMs ?? 0
+                } ms`}
+              />
+              <Diagnostic
+                label="Observer events"
+                value={`${diagnostics.observer.replayedEventCount} replayed/deduplicated; ${diagnostics.observer.ignoredEventCount} ignored`}
+              />
+              <Diagnostic
+                label="Last observer error"
+                value={
+                  diagnostics.observer.lastErrorCategory
+                    ? `${diagnostics.observer.lastErrorCategory} at ${formatTime(
+                        diagnostics.observer.lastErrorAt,
+                      )}`
+                    : "None"
+                }
+              />
+              <Diagnostic
+                label="Scheduler"
+                value={`next ${formatTime(diagnostics.scheduler.nextRunAt)}; ${
+                  diagnostics.scheduler.lastRunOutcome ?? "not run"
+                }`}
+              />
+              <Diagnostic
+                label="Missed-run recovery"
+                value={formatTime(diagnostics.scheduler.missedRunRecoveredAt)}
+              />
+              <Diagnostic
+                label="Reports"
+                value={`facts ${formatTime(
+                  diagnostics.reports.lastFactualReportAt,
+                )}; narrative ${diagnostics.reports.lastNarrativeOutcome ?? "none"}`}
+              />
+              <Diagnostic
+                label="Runtime"
+                value={`${diagnostics.runtime.application} ${diagnostics.runtime.version} · ${diagnostics.runtime.node}`}
+              />
+            </dl>
+            <ul className="retained-counts" aria-label="Retained record counts">
+              {diagnostics.retainedCounts.map((item) => (
+                <li key={item.category}>
+                  <strong>{item.count}</strong>
+                  <span>{item.category}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        <div className="danger-zone">
+          <div>
+            <label htmlFor="delete-local-date">Retained local day</label>
+            <input
+              id="delete-local-date"
+              type="date"
+              value={deleteDate}
+              onChange={(event) => setDeleteDate(event.target.value)}
+            />
+            <button
+              ref={deleteDayButton}
+              className="danger-button"
+              type="button"
+              disabled={!deleteDate}
+              onClick={() => openDialog("day")}
+            >
+              Delete this local day
+            </button>
+          </div>
+          <div>
+            <strong>Reset Codex Daily</strong>
+            <p>Deletes all monitor-owned data and restores default preferences.</p>
+            <button
+              ref={deleteAllButton}
+              className="danger-button"
+              type="button"
+              onClick={() => openDialog("all")}
+            >
+              Delete all local data
+            </button>
+          </div>
+        </div>
+        <p className="privacy-warning">
+          Deletion never changes Codex chats. Monitoring may rediscover current thread
+          metadata after it resumes.
+        </p>
+      </section>
+      {dialog && (
+        <div className="dialog-backdrop">
+          <div
+            ref={dialogElement}
+            className="confirmation-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-dialog-title"
+            aria-describedby="delete-dialog-description"
+            onKeyDown={handleDialogKey}
+          >
+            <h2 id="delete-dialog-title">
+              {dialog === "day" ? `Delete ${deleteDate}?` : "Delete all local data?"}
+            </h2>
+            <p id="delete-dialog-description">
+              This affects Codex Daily only. Type <strong>{expectedConfirmation}</strong>{" "}
+              to confirm. This cannot be undone from the app.
+            </p>
+            <form onSubmit={(event) => void confirmDeletion(event)}>
+              <label>
+                Confirmation
+                <input
+                  ref={confirmationInput}
+                  value={confirmation}
+                  onChange={(event) => setConfirmation(event.target.value)}
+                  autoComplete="off"
+                />
+              </label>
+              <div className="dialog-actions">
+                <button type="button" className="secondary-button" onClick={closeDialog}>
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="danger-button"
+                  disabled={deleting || confirmation !== expectedConfirmation}
+                >
+                  {deleting ? "Deleting…" : "Delete local data"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </article>
   );
+}
+
+function Diagnostic({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function formatTime(value: string | null): string {
+  return value ? new Date(value).toLocaleString() : "never";
 }

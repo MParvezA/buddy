@@ -1,6 +1,5 @@
 import { Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
-import { DashboardDataProvider } from "./data/dashboard-context";
 import { AttentionProvider } from "./data/attention-context";
 import { ObserverProvider } from "./data/observer-context";
 import { PlanningProvider } from "./data/planning-context";
@@ -14,8 +13,7 @@ import { ReportDetailPage } from "./pages/ReportDetailPage";
 
 export function App() {
   return (
-    <DashboardDataProvider>
-      <ObserverProvider>
+    <ObserverProvider>
         <AttentionProvider>
           <PlanningProvider>
             <ReportProvider>
@@ -32,7 +30,6 @@ export function App() {
             </ReportProvider>
           </PlanningProvider>
         </AttentionProvider>
-      </ObserverProvider>
-    </DashboardDataProvider>
+    </ObserverProvider>
   );
 }

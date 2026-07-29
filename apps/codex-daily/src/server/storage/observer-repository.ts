@@ -99,7 +99,7 @@ export class ObserverRepository {
 
   upsertThread(thread: ObservedThread): boolean {
     if (this.isExcluded(thread.id)) return false;
-    this.db
+    const result = this.db
       .prepare(`
         INSERT INTO observed_threads(
           id, session_id, title, cwd, source, cli_version, created_at, updated_at,
@@ -121,6 +121,7 @@ export class ObserverRepository {
           waiting_on_approval = excluded.waiting_on_approval,
           waiting_on_user_input = excluded.waiting_on_user_input,
           last_activity_at = COALESCE(excluded.last_activity_at, observed_threads.last_activity_at)
+        WHERE excluded.updated_at >= observed_threads.updated_at
       `)
       .run(
         thread.id,
@@ -139,7 +140,15 @@ export class ObserverRepository {
         Number(thread.waitingOnUserInput),
         thread.lastActivityAt,
       );
-    return true;
+    return result.changes > 0;
+  }
+
+  activityExists(sourceKey: string): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM observed_activities WHERE source_key = ?")
+        .get(sourceKey),
+    );
   }
 
   updateRuntime(

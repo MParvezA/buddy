@@ -85,6 +85,31 @@ describe("ObserverRepository", () => {
     database.close();
   });
 
+  it("ignores out-of-order thread snapshots instead of regressing last-known state", () => {
+    const database = openDatabase({ path: ":memory:" });
+    const observer = new ObserverRepository(database.connection);
+    observer.upsertThread({
+      ...thread,
+      title: "Newest state",
+      updatedAt: "2026-07-29T12:05:00.000Z",
+      runtime: "active",
+    });
+    expect(
+      observer.upsertThread({
+        ...thread,
+        title: "Older replay",
+        updatedAt: "2026-07-29T11:55:00.000Z",
+        runtime: "unknown",
+      }),
+    ).toBe(false);
+    expect(observer.findThread(thread.id)).toMatchObject({
+      title: "Newest state",
+      updatedAt: "2026-07-29T12:05:00.000Z",
+      runtime: "active",
+    });
+    database.close();
+  });
+
   it("keeps reused server request IDs distinct and resolves them within each thread", () => {
     const database = openDatabase({ path: ":memory:" });
     const observer = new ObserverRepository(database.connection);

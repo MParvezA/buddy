@@ -2,7 +2,6 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { representativeDay } from "../server/representative-day";
 import type { AttentionSnapshot } from "../shared/attention";
 import type { HealthResponse } from "../shared/dashboard";
 import type { ObserverSnapshot } from "../shared/observer-types";
@@ -122,7 +121,6 @@ function mockSuccessfulApi() {
     vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/health") return Promise.resolve(jsonResponse(health));
-      if (url === "/api/day") return Promise.resolve(jsonResponse(representativeDay));
       if (url === "/api/planning") return Promise.resolve(jsonResponse(planning));
       if (url === "/api/observer") return Promise.resolve(jsonResponse(observer));
       if (url === "/api/attention") return Promise.resolve(jsonResponse(attention));
@@ -235,12 +233,19 @@ describe("daily dashboard", () => {
     expect(screen.queryByText("Operator confirmed complete")).not.toBeInTheDocument();
   });
 
-  it("shows a useful error while preserving the shell when the day request fails", async () => {
+  it("shows a useful planning error while preserving the shell", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL) => {
         if (String(input) === "/api/health") return Promise.resolve(jsonResponse(health));
-        if (String(input) === "/api/planning") return Promise.resolve(jsonResponse(planning));
+        if (String(input) === "/api/planning") {
+          return Promise.resolve(
+            jsonResponse(
+              { error: { message: "Local planning is unavailable" } },
+              { status: 503 },
+            ),
+          );
+        }
         if (String(input) === "/api/observer") return Promise.resolve(jsonResponse(observer));
         if (String(input) === "/api/attention") return Promise.resolve(jsonResponse(attention));
         return Promise.resolve(jsonResponse({ error: "Unavailable" }, { status: 503 }));
@@ -248,9 +253,9 @@ describe("daily dashboard", () => {
     );
     renderApp();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Today’s snapshot is unavailable");
+    expect(await screen.findByText("Local planning is unavailable")).toBeVisible();
     expect(screen.getByRole("navigation", { name: "Primary" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Try loading again" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 });
 

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "concurrently --kill-others --names service,client \"tsx watch src/server/main.ts\" \"vite --host 127.0.0.1\"",
-    "build": "vite build && tsc -p tsconfig.server.json",
+    "build": "node scripts/clean-build.mjs && vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/server/main.js",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.server.json --noEmit",

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { DashboardSnapshot, HealthResponse } from "../shared/dashboard.js";
+import type { HealthResponse } from "../shared/dashboard.js";
 import { buildApp } from "./app.js";
 
 let app: FastifyInstance | undefined;
@@ -12,11 +12,10 @@ afterEach(async () => {
 });
 
 describe("local service", () => {
-  it("returns deterministic representative health and day contracts", async () => {
+  it("returns observer health and an empty local attention contract", async () => {
     app = await buildApp({ serveStatic: false, databasePath: ":memory:" });
 
     const health = await app.inject({ method: "GET", url: "/api/health" });
-    const day = await app.inject({ method: "GET", url: "/api/day" });
 
     expect(health.statusCode).toBe(200);
     expect(health.json<HealthResponse>()).toEqual({
@@ -29,12 +28,6 @@ describe("local service", () => {
         diagnostic: null,
       },
     });
-    expect(day.statusCode).toBe(200);
-    expect(day.json<DashboardSnapshot>()).toMatchObject({
-      mode: "representative",
-      date: "2026-07-29",
-      connection: { state: "not-connected" },
-    });
     const attention = await app.inject({ method: "GET", url: "/api/attention" });
     expect(attention.json()).toMatchObject({
       capability: "standalone_history",
@@ -43,7 +36,7 @@ describe("local service", () => {
     });
   });
 
-  it("adds an empty durable planning resource without changing representative monitoring", async () => {
+  it("adds an empty durable planning resource without a legacy dashboard endpoint", async () => {
     app = await buildApp({
       serveStatic: false,
       databasePath: ":memory:",

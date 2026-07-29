@@ -53,15 +53,22 @@ export class PlanningRepository {
     }
   }
 
-  ensureDay(localDate: string, now: string): string {
+  ensureDay(localDate: string, now: string, timezone = "Europe/Berlin"): string {
     const existing = this.db
       .prepare("SELECT id FROM days WHERE local_date = ?")
       .get(localDate) as { id: string } | undefined;
-    if (existing) return existing.id;
+    if (existing) {
+      this.db
+        .prepare("UPDATE days SET timezone = COALESCE(timezone, ?) WHERE id = ?")
+        .run(timezone, existing.id);
+      return existing.id;
+    }
     const id = randomUUID();
     this.db
-      .prepare("INSERT INTO days(id, local_date, created_at, updated_at) VALUES (?, ?, ?, ?)")
-      .run(id, localDate, now, now);
+      .prepare(
+        "INSERT INTO days(id, local_date, created_at, updated_at, timezone) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(id, localDate, now, now, timezone);
     return id;
   }
 
@@ -118,9 +125,10 @@ export class PlanningRepository {
     clarification: string | null;
     position: number;
     originTaskId?: string | null;
+    timezone?: string;
     now: string;
   }): PlanningTask {
-    const dayId = this.ensureDay(input.localDate, input.now);
+    const dayId = this.ensureDay(input.localDate, input.now, input.timezone);
     const id = randomUUID();
     this.db
       .prepare(`

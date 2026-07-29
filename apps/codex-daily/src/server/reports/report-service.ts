@@ -85,7 +85,11 @@ export class ReportService {
   ): Promise<ReportSnapshot | null> {
     const schedule = this.schedule();
     const now = this.clock().toISOString();
-    const bounds = reportDayBounds(localDate, schedule.timezone);
+    const timezone = this.repository.timezoneForLocalDate(
+      localDate,
+      schedule.timezone,
+    );
+    const bounds = reportDayBounds(localDate, timezone);
     let snapshot: ReportSnapshot;
     try {
       snapshot = this.repository.createSnapshot({
@@ -95,6 +99,7 @@ export class ReportService {
         cutoff: now,
         trigger,
         narrativeRequested: schedule.narrativeEnabled,
+        timezone,
         now,
       });
     } catch (error) {

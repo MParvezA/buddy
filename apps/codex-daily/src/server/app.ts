@@ -12,7 +12,6 @@ import { ObserverService } from "./codex/observer-service.js";
 import type { ProcessFactory } from "./codex/app-server-client.js";
 import { registerPlanningRoutes } from "./planning/planning-routes.js";
 import { PlanningService } from "./planning/planning-service.js";
-import { representativeDay } from "./representative-day.js";
 import { registerReportRoutes } from "./reports/report-routes.js";
 import { ReportRepository } from "./reports/report-repository.js";
 import { ReportScheduler } from "./reports/report-scheduler.js";
@@ -25,6 +24,10 @@ import { ObserverReportingGateway } from "./reports/observer-reporting-gateway.j
 import { openDatabase } from "./storage/database.js";
 import { ObserverRepository } from "./storage/observer-repository.js";
 import { PlanningRepository } from "./storage/planning-repository.js";
+import { WriteCoordinator, LocalDataBusyError } from "./runtime/write-coordinator.js";
+import { PrivacyService } from "./privacy/privacy-service.js";
+import { registerPrivacyRoutes } from "./privacy/privacy-routes.js";
+import { DiagnosticsService } from "./diagnostics/diagnostics-service.js";
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -33,6 +36,7 @@ export interface BuildAppOptions {
   databasePath?: string;
   clock?: () => Date;
   timezone?: string;
+  reportTime?: string;
   migrationsDirectory?: string;
   observer?: boolean;
   observerMode?: ObserverMode;
@@ -47,6 +51,7 @@ export interface BuildAppOptions {
   reportNarrativeProvider?: ReportNarrativeProvider;
   reportSetTimer?: typeof setTimeout;
   reportClearTimer?: typeof clearTimeout;
+  version?: string;
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -57,10 +62,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       path.resolve(process.cwd(), ".codex-daily-data/codex-daily.sqlite"),
     migrationsDirectory: options.migrationsDirectory,
   });
+  const reportRepository = new ReportRepository(database.connection);
   const planning = new PlanningService({
     repository: new PlanningRepository(database.connection),
     clock: options.clock,
-    timezone: options.timezone,
+    timezone: () => reportRepository.getSchedule().timezone,
   });
   const observer = new ObserverService({
     repository: new ObserverRepository(database.connection),
@@ -80,13 +86,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     clock: options.clock,
     sweepIntervalMs: options.attentionSweepIntervalMs,
   });
-  const reportRepository = new ReportRepository(database.connection);
   const reports = new ReportService(
     reportRepository,
     options.clock,
     options.reportNarrativeProvider ??
       new ReportingThreadNarrativeProvider(new ObserverReportingGateway(observer)),
   );
+  if (options.timezone || options.reportTime) {
+    const configured = reports.schedule();
+    reports.updateSchedule({
+      ...configured,
+      timezone: options.timezone ?? configured.timezone,
+      time: options.reportTime ?? configured.time,
+    });
+  }
   const reportScheduler = new ReportScheduler({
     service: reports,
     repository: reportRepository,
@@ -94,8 +107,61 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     setTimer: options.reportSetTimer,
     clearTimer: options.reportClearTimer,
   });
+  const observerEnabled = options.observer ?? process.env.NODE_ENV !== "test";
+  const coordinator = new WriteCoordinator();
+  const pauseWriters = async () => {
+    await reportScheduler.stopAndDrain();
+    attention.stop();
+    await observer.stop();
+  };
+  const resumeWriters = async () => {
+    attention.start();
+    reportScheduler.resume();
+    if (observerEnabled) void observer.start();
+  };
+  const privacy = new PrivacyService({
+    database: database.connection,
+    reports: reportRepository,
+    coordinator,
+    clock: options.clock,
+    pauseWriters,
+    resumeWriters,
+  });
+  const diagnostics = new DiagnosticsService({
+    dataLocation: database.path,
+    privacy,
+    observer,
+    scheduler: reportScheduler,
+    reports: reportRepository,
+    version: options.version ?? "0.1.0",
+  });
+  const writeReleases = new WeakMap<object, () => void>();
+  app.addHook("onRequest", async (request, reply) => {
+    if (
+      ["GET", "HEAD", "OPTIONS"].includes(request.method) ||
+      request.url.startsWith("/api/operations/")
+    ) {
+      return;
+    }
+    try {
+      writeReleases.set(request, coordinator.beginWrite());
+    } catch (error) {
+      if (error instanceof LocalDataBusyError) {
+        return reply.code(503).send({
+          error: { code: "maintenance", message: error.message },
+        });
+      }
+      throw error;
+    }
+  });
+  const releaseWrite = (request: object) => {
+    writeReleases.get(request)?.();
+    writeReleases.delete(request);
+  };
+  app.addHook("onResponse", async (request) => releaseWrite(request));
+  app.addHook("onError", async (request) => releaseWrite(request));
   app.addHook("onClose", async () => {
-    reportScheduler.stop();
+    await reportScheduler.stopAndDrain();
     attention.stop();
     await observer.stop();
     database.close();
@@ -112,14 +178,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     },
   }));
 
-  app.get("/api/day", async () => representativeDay);
   await registerPlanningRoutes(app, planning);
   await registerObserverRoutes(app, observer);
   await registerAttentionRoutes(app, attention);
   await registerReportRoutes(app, reports, reportScheduler);
+  await registerPrivacyRoutes(app, privacy, diagnostics);
   attention.start();
   await reportScheduler.start();
-  if (options.observer ?? process.env.NODE_ENV !== "test") {
+  if (observerEnabled) {
     void observer.start();
   }
 

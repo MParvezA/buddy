@@ -96,4 +96,101 @@ describe("report scheduler", () => {
     expect(value.repository.automaticExists("2026-07-28")).toBe(false);
     value.scheduler.stop();
   });
+
+  it("recomputes the slot immediately after a runtime timezone preference change", async () => {
+    const now = { value: new Date("2026-07-29T17:00:00.000Z") };
+    const value = setup(now);
+    await value.scheduler.start();
+    expect(value.scheduler.operationalDiagnostics()).toMatchObject({
+      lastRunTrigger: "missed_recovery",
+      lastRunOutcome: "created",
+      missedRunRecoveredAt: "2026-07-29T17:00:00.000Z",
+    });
+    value.service.updateSchedule({
+      time: "18:00",
+      timezone: "America/New_York",
+      narrativeEnabled: false,
+    });
+    await value.scheduler.preferencesChanged();
+    expect(value.scheduler.state().nextRunAt).toBe("2026-07-29T22:00:00.000Z");
+    value.scheduler.stop();
+  });
+
+  it("does not duplicate the fall-back wall-time slot across process restarts", async () => {
+    const now = { value: new Date("2026-10-25T00:31:00.000Z") };
+    const value = setup(now);
+    value.service.updateSchedule({
+      time: "02:30",
+      timezone: "Europe/Berlin",
+      narrativeEnabled: false,
+    });
+    await value.scheduler.start();
+    expect(value.repository.listSnapshots()).toHaveLength(1);
+    value.scheduler.stop();
+
+    now.value = new Date("2026-10-25T01:31:00.000Z");
+    const restarted = new ReportScheduler({
+      service: value.service,
+      repository: value.repository,
+      clock: () => now.value,
+      setTimer: (() => ({ fake: true })) as unknown as typeof setTimeout,
+      clearTimer: (() => undefined) as unknown as typeof clearTimeout,
+    });
+    await restarted.start();
+    expect(value.repository.listSnapshots()).toHaveLength(1);
+    restarted.stop();
+  });
+
+  it("drains an in-flight run without allowing its finally path to reschedule", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const repository = new ReportRepository(database.connection);
+    const now = { value: new Date("2026-07-29T15:59:00.000Z") };
+    let resolveNarrative!: () => void;
+    const narrativeWait = new Promise<void>((resolve) => {
+      resolveNarrative = resolve;
+    });
+    const service = new ReportService(repository, () => now.value, {
+      generate: async () => {
+        await narrativeWait;
+        return {
+          reportingThreadId: "reporting-thread",
+          text: "Bounded narrative",
+          suggestions: [],
+        };
+      },
+    });
+    service.updateSchedule({
+      time: "18:00",
+      timezone: "Europe/Berlin",
+      narrativeEnabled: true,
+    });
+    let callback: (() => void) | null = null;
+    const setTimer = ((next: () => void) => {
+      callback = () => {
+        callback = null;
+        next();
+      };
+      return { fake: true };
+    }) as unknown as typeof setTimeout;
+    const clearTimer = (() => {
+      callback = null;
+    }) as unknown as typeof clearTimeout;
+    const scheduler = new ReportScheduler({
+      service,
+      repository,
+      clock: () => now.value,
+      setTimer,
+      clearTimer,
+    });
+    await scheduler.start();
+    now.value = new Date("2026-07-29T16:00:00.000Z");
+    callback?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    const drained = scheduler.stopAndDrain();
+    expect(callback).toBeNull();
+    resolveNarrative();
+    await drained;
+    expect(callback).toBeNull();
+    expect(repository.listSnapshots()).toHaveLength(1);
+  });
 });

@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../../../src/client/App";
-import { representativeDay } from "../../../../src/server/representative-day";
 import type { ObserverSnapshot } from "../../../../src/shared/observer-types";
 
 const task = {
@@ -73,7 +72,6 @@ describe("Live Work", () => {
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url === "/api/day") return Promise.resolve(Response.json(representativeDay));
         if (url === "/api/planning") {
           return Promise.resolve(
             Response.json({

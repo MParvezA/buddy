@@ -2,11 +2,11 @@
 
 ## Implementation Status
 
-Status: planned
-Commit:
-Verification:
-Deviations:
-Follow-ups:
+Status: implemented
+Commit: `Slice 06: Operational Hardening` (this status-bearing commit)
+Verification: `npm run check` passed with 30 files/87 tests; independent Playwright verification passed 14 browser flows with 6 intentional duplicate mobile-flow skips; repository contracts passed 4/4; `colcon list` retained the existing 16 ROS packages; protected-path and whitespace diff checks were clean. Focused coverage proves the persistent morning-to-next-morning lifecycle, bounded reconnect and replay deduplication, out-of-order observation protection, scheduler drain/restart and DST behavior, retained per-day timezone semantics, deterministic privacy-safe export, transactional day/delete-all behavior and rollback, zero outbound Codex mutation calls during deletion, redacted diagnostics, typed confirmations, keyboard focus handling, production build cleanup, and graceful service shutdown.
+Deviations: Playwright required sandbox escalation to bind the loopback test server. `npm ci` reported seven existing high-severity dependency audit advisories; dependency remediation was not expanded into this slice. A full ROS test run was interrupted after `buddy_bringup` hung and reported 233 tests, one error, one failure, and 13 skips; the observed `buddy_bringup` missing-result error and `buddy_navigation` `stale_action_owner` failure are in untouched ROS paths. The unchanged workspace still passed a full 16-package build, all 4 repository contracts, and the independently rerun package inventory. Process restart is proven by the persistent-database lifecycle integration test rather than duplicating the same scenario in Playwright.
+Follow-ups: None. FUP-001 through FUP-006 remain deferred.
 
 ## Context And Selected Slice
 

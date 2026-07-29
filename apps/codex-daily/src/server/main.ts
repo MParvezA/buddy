@@ -12,6 +12,7 @@ const app = await buildApp({
   serveStatic: process.env.NODE_ENV !== "development",
   databasePath: process.env.CODEX_DAILY_DB_PATH,
   timezone: process.env.CODEX_DAILY_TIMEZONE,
+  reportTime: process.env.CODEX_DAILY_REPORT_TIME,
   clock,
   observer: true,
   observerMode:
@@ -24,9 +25,26 @@ const app = await buildApp({
     : undefined,
 });
 
+let shuttingDown = false;
+const shutdown = async (signal: NodeJS.Signals) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  app.log.info({ signal }, "shutting down Codex Daily");
+  try {
+    await app.close();
+  } catch (error) {
+    app.log.error(error);
+    process.exitCode = 1;
+  }
+};
+
+process.once("SIGINT", () => void shutdown("SIGINT"));
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+
 try {
   await app.listen({ host, port });
 } catch (error) {
   app.log.error(error);
   process.exitCode = 1;
+  await app.close();
 }

@@ -403,7 +403,7 @@ h3 {
   line-height: 1.6;
 }
 
-.demo-stamp {
+.local-stamp {
   display: grid;
   min-width: 176px;
   grid-template-columns: auto 1fr;
@@ -417,13 +417,13 @@ h3 {
   font-weight: 600;
 }
 
-.demo-stamp > span {
+.local-stamp > span {
   grid-row: span 2;
   color: var(--amber);
   font-size: 19px;
 }
 
-.demo-stamp small {
+.local-stamp small {
   margin-top: 2px;
   color: var(--text-faint);
   font-size: 10px;
@@ -1372,6 +1372,182 @@ h3 {
   text-transform: uppercase;
 }
 
+.operations-panel {
+  margin-top: 14px;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 22px 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--border);
+}
+
+.diagnostics-grid > div {
+  min-width: 0;
+  padding: 12px;
+  background: var(--surface-soft);
+}
+
+.diagnostics-grid dt {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.diagnostics-grid dd {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.retained-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0 0 22px;
+  padding: 0;
+  list-style: none;
+}
+
+.retained-counts li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.retained-counts strong {
+  color: var(--text);
+}
+
+.danger-zone {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.danger-zone > div {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 9px;
+  padding: 14px;
+  border: 1px solid rgba(239, 141, 131, 0.28);
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+}
+
+.danger-zone label,
+.danger-zone strong,
+.confirmation-dialog label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.danger-zone p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.danger-zone input,
+.confirmation-dialog input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.danger-button {
+  padding: 9px 13px;
+  border: 1px solid rgba(239, 141, 131, 0.6);
+  border-radius: 8px;
+  background: rgba(239, 141, 131, 0.12);
+  color: #ffd4cf;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.privacy-warning {
+  margin: 15px 0 0;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(3, 5, 7, 0.78);
+}
+
+.confirmation-dialog {
+  width: min(100%, 520px);
+  padding: 22px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+}
+
+.confirmation-dialog h2 {
+  margin: 0;
+}
+
+.confirmation-dialog > p {
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.confirmation-dialog form,
+.confirmation-dialog label {
+  display: grid;
+  gap: 8px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 18px;
+}
+
 @media (max-width: 900px) {
   .attention-list,
   .work-grid {
@@ -1385,6 +1561,11 @@ h3 {
 
   .settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .diagnostics-grid,
+  .danger-zone {
+    grid-template-columns: 1fr;
   }
 
   .outcome-form {
@@ -1463,7 +1644,7 @@ h3 {
     font-size: 29px;
   }
 
-  .demo-stamp {
+  .local-stamp {
     width: fit-content;
     min-width: 0;
     margin-top: 16px;

@@ -51,7 +51,7 @@ The final workspace validation completed:
 
 ```text
 16 packages built
-232 tests
+242 tests
 0 errors
 0 failures
 13 skipped
@@ -63,8 +63,8 @@ provider or safety tests.
 
 Provider-focused results include:
 
-- `buddy_voice`: 62 passing tests;
-- `buddy_brain`: 26 passing tests;
+- `buddy_voice`: 72 passing tests;
+- `buddy_brain`: 27 passing tests;
 - `buddy_bringup`: 15 passing tests, including the root end-to-end flow;
 - launch-contract checks proving real providers require explicit opt-in and
   the interactive terminal is not embedded in production composition.
@@ -88,7 +88,7 @@ context bound, and bounded output:
 
 llama.cpp output is written to an owner-only temporary file, parsed as one
 assistant completion, then removed. Crash, timeout, shutdown, forged-delimiter,
-and cleanup behavior are covered by tests.
+surviving-descendant, and cleanup behavior are covered by tests.
 
 ### Voice
 
@@ -110,6 +110,17 @@ not evidence of a successful spoken English or German transcript.
 
 Provider-owned microphone WAV, Whisper output, Piper WAV, and llama completion
 files were absent after each completed or failed request.
+
+Adversarial provider tests additionally prove:
+
+- a non-reading Piper child cannot block cancellation or timeout while Buddy
+  delivers a large input;
+- provider files live in random private `0700` directories and reject
+  symlinks, pre-existing targets, and oversized WAV/JSON outputs;
+- voice and model children receive explicit environment allowlists rather than
+  secret-bearing parent configuration;
+- an exited provider launcher cannot leave a surviving descendant process
+  group after timeout, cancellation, or shutdown.
 
 ### Full local composition
 

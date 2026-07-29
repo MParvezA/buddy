@@ -23,6 +23,7 @@ class AudioCapture:
     input_mode: int
     locale: str = 'en-US'
     audio_path: Path | None = None
+    cleanup_directory: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class SynthesizedSpeech:
 
     duration_seconds: float
     audio_path: Path | None = None
+    cleanup_directory: Path | None = None
 
 
 class AudioInputProvider(Protocol):

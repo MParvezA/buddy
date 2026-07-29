@@ -60,13 +60,52 @@ describe("activity normalization", () => {
         },
       },
       now,
+      "connection-1",
     );
     expect(normalized.activity).toMatchObject({
-      sourceKey: "request:thread-one:44:pending",
+      sourceKey: "request:connection-1:thread-one:44:pending",
       category: "approval",
       lifecycle: "pending",
     });
     expect(JSON.stringify(normalized)).not.toMatch(/rm SECRET|SECRET REASON|SECRET DIFF/);
+  });
+
+  it("keeps reused request IDs distinct across connection generations", () => {
+    const request = {
+      id: 44,
+      method: "item/tool/requestUserInput",
+      params: {
+        threadId: "thread-one",
+        turnId: "turn-one",
+        itemId: "item-one",
+      },
+    };
+    const first = normalizeMessage(
+      request,
+      now,
+      "process-1:connection-1",
+    ).activity;
+    const replayedId = normalizeMessage(
+      request,
+      now,
+      "process-2:connection-1",
+    ).activity;
+    const resolved = normalizeMessage(
+      {
+        method: "serverRequest/resolved",
+        params: { threadId: "thread-one", requestId: 44 },
+      },
+      now,
+      "process-2:connection-1",
+    ).activity;
+
+    expect(first?.sourceKey).not.toBe(replayedId?.sourceKey);
+    expect(replayedId?.sourceKey).toBe(
+      "request:process-2:connection-1:thread-one:44:pending",
+    );
+    expect(resolved?.sourceKey).toBe(
+      "request:process-2:connection-1:thread-one:44:resolved",
+    );
   });
 
   it("excludes child/subagent threads and never uses preview as title", () => {

@@ -13,9 +13,10 @@ export function ThreadDetailPage() {
   const [detail, setDetail] = useState<TransientThreadDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attentionHistory, setAttentionHistory] = useState<AttentionItem[]>([]);
+  const [attentionLoading, setAttentionLoading] = useState(true);
+  const [attentionError, setAttentionError] = useState<string | null>(null);
   const thread = observer.snapshot?.threads.find((item) => item.id === threadId) ?? null;
-  const activities =
-    observer.snapshot?.activities.filter((item) => item.threadId === threadId) ?? [];
+  const activities = detail?.activities ?? [];
 
   useEffect(() => {
     let active = true;
@@ -37,10 +38,22 @@ export function ThreadDetailPage() {
     let active = true;
     getThreadAttention(threadId)
       .then((value) => {
-        if (active) setAttentionHistory(value);
+        if (active) {
+          setAttentionHistory(value);
+          setAttentionError(null);
+        }
       })
-      .catch(() => {
-        if (active) setAttentionHistory([]);
+      .catch((reason: unknown) => {
+        if (active) {
+          setAttentionError(
+            reason instanceof Error
+              ? reason.message
+              : "Attention history could not be loaded.",
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setAttentionLoading(false);
       });
     return () => {
       active = false;
@@ -95,7 +108,9 @@ export function ThreadDetailPage() {
           <aside className="panel quiet-panel">
             <p className="eyebrow">Activity signals</p>
             <h2>Normalized timeline</h2>
-            {activities.length === 0 ? (
+            {!detail && !error ? (
+              <p role="status">Loading normalized activity…</p>
+            ) : activities.length === 0 ? (
               <p>No normalized activity facts are retained for this thread yet.</p>
             ) : (
               <ul className="signal-list">
@@ -107,7 +122,11 @@ export function ThreadDetailPage() {
               </ul>
             )}
             <h3 className="detail-subheading">Attention projection history</h3>
-            {attentionHistory.length === 0 ? (
+            {attentionLoading ? (
+              <p role="status">Loading attention history…</p>
+            ) : attentionError ? (
+              <p className="inline-notice" role="alert">{attentionError}</p>
+            ) : attentionHistory.length === 0 ? (
               <p>No attention projections are retained for this thread.</p>
             ) : (
               <ul className="signal-list">

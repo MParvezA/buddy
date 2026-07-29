@@ -13,6 +13,7 @@ import {
   getLatestReport,
   retryNarrative,
 } from "../api/report-client";
+import { REPORT_SCHEDULE_CHANGED_EVENT } from "./invalidation";
 
 interface ReportData {
   latest: ReportSnapshot | null;
@@ -36,8 +37,14 @@ export function ReportProvider({ children }: PropsWithChildren) {
   const [version, setVersion] = useState(0);
   const reload = useCallback(() => {
     setLoading(true);
+    setScheduler(null);
     setVersion((value) => value + 1);
   }, []);
+
+  useEffect(() => {
+    window.addEventListener(REPORT_SCHEDULE_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(REPORT_SCHEDULE_CHANGED_EVENT, reload);
+  }, [reload]);
 
   useEffect(() => {
     let active = true;

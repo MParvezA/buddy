@@ -19,6 +19,12 @@ export function ReportPreview() {
         Next run {reports.scheduler ? new Date(reports.scheduler.nextRunAt).toLocaleString() : "loading"}.
       </p>
       {reports.error && <p className="inline-notice" role="alert">{reports.error}</p>}
+      {reports.scheduler?.lastFailure && (
+        <p className="inline-notice" role="alert">
+          {reports.scheduler.lastFailure} The factual history remains available; use
+          Generate report to recover manually.
+        </p>
+      )}
       <button
         className="secondary-button"
         type="button"

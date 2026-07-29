@@ -54,6 +54,41 @@ export interface BuildAppOptions {
   version?: string;
 }
 
+function loopbackRequestAllowed(hostHeader: string | undefined, originHeader: string | undefined) {
+  if (!hostHeader) return false;
+  let host: URL;
+  try {
+    host = new URL(`http://${hostHeader}`);
+  } catch {
+    return false;
+  }
+  if (
+    host.username ||
+    host.password ||
+    host.pathname !== "/" ||
+    host.search ||
+    host.hash ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(host.hostname.toLowerCase())
+  ) {
+    return false;
+  }
+  if (!originHeader) return true;
+  try {
+    const origin = new URL(originHeader);
+    return (
+      origin.protocol === "http:" &&
+      origin.username === "" &&
+      origin.password === "" &&
+      origin.pathname === "/" &&
+      origin.search === "" &&
+      origin.hash === "" &&
+      origin.host.toLowerCase() === host.host.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
   const database = openDatabase({
@@ -92,6 +127,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     options.reportNarrativeProvider ??
       new ReportingThreadNarrativeProvider(new ObserverReportingGateway(observer)),
   );
+  reports.recoverOrphanedNarratives();
   if (options.timezone || options.reportTime) {
     const configured = reports.schedule();
     reports.updateSchedule({
@@ -137,6 +173,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
   const writeReleases = new WeakMap<object, () => void>();
   app.addHook("onRequest", async (request, reply) => {
+    const origin =
+      typeof request.headers.origin === "string"
+        ? request.headers.origin
+        : undefined;
+    if (!loopbackRequestAllowed(request.headers.host, origin)) {
+      return reply.code(403).send({
+        error: {
+          code: "forbidden",
+          message: "Codex Daily accepts only same-origin loopback requests.",
+        },
+      });
+    }
     if (
       ["GET", "HEAD", "OPTIONS"].includes(request.method) ||
       request.url.startsWith("/api/operations/")

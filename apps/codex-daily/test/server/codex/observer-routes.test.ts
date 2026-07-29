@@ -56,7 +56,9 @@ describe("observer routes", () => {
       url: "/api/observer/threads/thread-one",
     });
     expect(detail.statusCode).toBe(200);
+    expect(detail.headers["cache-control"]).toBe("no-store");
     expect(detail.body).toContain("SECRET RESPONSE");
+    expect(detail.json().activities.length).toBeGreaterThan(0);
     expect((await app.inject({ method: "GET", url: "/api/observer" })).body).not.toContain(
       "SECRET RESPONSE",
     );
@@ -91,14 +93,12 @@ describe("observer routes", () => {
     app = Fastify({ logger: false });
     await registerObserverRoutes(app, service);
     expect(service.snapshot().threads.some((thread) => thread.id === "thread-one")).toBe(false);
-    expect(
-      (
-        await app.inject({
-          method: "GET",
-          url: "/api/observer/threads/thread-one",
-        })
-      ).statusCode,
-    ).toBe(404);
+    const excludedDetail = await app.inject({
+      method: "GET",
+      url: "/api/observer/threads/thread-one",
+    });
+    expect(excludedDetail.statusCode).toBe(404);
+    expect(excludedDetail.headers["cache-control"]).toBe("no-store");
     expect(
       (
         await app.inject({

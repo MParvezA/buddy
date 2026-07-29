@@ -53,6 +53,7 @@ export class ReportScheduler {
   async stopAndDrain(): Promise<void> {
     this.stop();
     await Promise.allSettled([...this.activeRuns]);
+    await this.service.drainNarratives();
   }
 
   resume(): void {
@@ -145,7 +146,7 @@ export class ReportScheduler {
     trigger: "scheduled" | "missed_recovery",
   ): Promise<void> {
     try {
-      const snapshot = await this.service.generate(localDate, trigger);
+      const snapshot = await this.service.generate(localDate, trigger, false);
       this.lastRunTrigger = trigger;
       this.lastRunOutcome = snapshot ? "created" : "already_exists";
       if (snapshot && trigger === "missed_recovery") {

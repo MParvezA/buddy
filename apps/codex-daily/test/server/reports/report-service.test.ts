@@ -142,7 +142,7 @@ describe("report service", () => {
     });
   });
 
-  it("rejects retry while the snapshot narrative is pending", async () => {
+  it("marks startup-orphaned pending narrative work as failed and retryable", async () => {
     const { repository, service } = setup();
     const snapshot = repository.createSnapshot({
       localDate: "2026-07-29",
@@ -153,9 +153,13 @@ describe("report service", () => {
       narrativeRequested: true,
       now: "2026-07-29T16:00:00.000Z",
     });
-    await expect(service.generateNarrative(snapshot.id)).rejects.toThrow(
-      /already in progress/,
-    );
+    expect(service.recoverOrphanedNarratives()).toBe(1);
+    expect(service.find(snapshot.id).narrative).toMatchObject({
+      status: "failed",
+      failure: "Codex narrative was interrupted by restart",
+    });
+    const retried = await service.generateNarrative(snapshot.id);
+    expect(retried.narrative.status).toBe("failed");
   });
 
   it("keeps facts readable when narrative persistence fails", async () => {

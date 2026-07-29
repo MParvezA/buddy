@@ -1,7 +1,7 @@
 # Codex Daily — Current Phase
 
 - Current source artifact: `5_review.md`
-- Current phase: `5_Review`; review failed at `0b43951`
-- Next action: return to `4_Implement` for the focused corrections in `5_review.md`
-- Implementation source: `3_plan_slice_06_operational_hardening.md` (`implemented`, corrections required)
+- Current phase: `4_Implement`; focused review corrections implemented
+- Next action: commit the corrections, then repeat `5_Review` against the exact commit
+- Implementation source: `5_review.md` (`correction implementation complete`)
 - Recommended topic branch: `feature/codex-daily`

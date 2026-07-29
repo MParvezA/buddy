@@ -25,7 +25,9 @@ export function getObserver(): Promise<ObserverSnapshot> {
 }
 
 export function getThreadDetail(threadId: string): Promise<TransientThreadDetail> {
-  return request(`/api/observer/threads/${encodeURIComponent(threadId)}`);
+  return request(`/api/observer/threads/${encodeURIComponent(threadId)}`, {
+    cache: "no-store",
+  });
 }
 
 export function linkTask(taskId: string, threadId: string): Promise<ObserverSnapshot> {

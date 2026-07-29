@@ -24,11 +24,17 @@ test("report regeneration preserves history and schedule validation is visible",
 }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "Exercise persistence once.");
   await page.goto("/");
+  const before = await page.request.get("/api/reports");
+  const beforeCount = (await before.json()).length as number;
+  await page.locator("section[data-section-order='5']").getByRole("button", {
+    name: "Generate report",
+  }).click();
+  await expect(page.locator("section[data-section-order='5']").getByText("Recorded facts")).toBeVisible();
   await page.locator("section[data-section-order='5']").getByRole("button", {
     name: "Generate report",
   }).click();
   await page.getByRole("link", { name: "Reports" }).click();
-  await expect(page.locator(".report-history-card")).toHaveCount(2);
+  await expect(page.locator(".report-history-card")).toHaveCount(beforeCount + 2);
 
   await page.getByRole("link", { name: "Settings" }).click();
   await page.getByLabel("Evening report time").fill("19:15");

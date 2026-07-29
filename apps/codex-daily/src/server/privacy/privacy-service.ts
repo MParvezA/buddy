@@ -298,6 +298,14 @@ export class PrivacyService {
           WHERE occurred_at >= ? AND occurred_at < ?
         `)
         .run(bounds.start, bounds.end);
+      this.db.exec(`
+        UPDATE observed_threads
+        SET last_activity_at = (
+          SELECT MAX(activities.occurred_at)
+          FROM observed_activities activities
+          WHERE activities.thread_id = observed_threads.id
+        )
+      `);
       this.db.prepare("DELETE FROM days WHERE local_date = ?").run(localDate);
     });
     return {

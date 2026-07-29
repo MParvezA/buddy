@@ -86,6 +86,59 @@ describe("ObserverService", () => {
     });
   });
 
+  it("keeps request episode identities distinct across process instances", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const repository = new ObserverRepository(database.connection);
+    service = new ObserverService({
+      repository,
+      mode: "shared_live",
+      executable: fixture,
+      processInstanceId: "process-one",
+      inventoryIntervalMs: 60_000,
+      requestTimeoutMs: 2_000,
+      clock: () => new Date("2026-07-29T12:00:00.000Z"),
+    });
+    await service.start();
+    await vi.waitFor(() => {
+      expect(
+        repository
+          .listActivities()
+          .some((activity) =>
+            activity.sourceKey.includes(
+              "request:process-one:connection-1:thread-one:700:pending",
+            ),
+          ),
+      ).toBe(true);
+    });
+    await service.stop();
+
+    service = new ObserverService({
+      repository,
+      mode: "shared_live",
+      executable: fixture,
+      processInstanceId: "process-two",
+      inventoryIntervalMs: 60_000,
+      requestTimeoutMs: 2_000,
+      clock: () => new Date("2026-07-29T12:00:00.000Z"),
+    });
+    await service.start();
+    await vi.waitFor(() => {
+      const pending = repository
+        .listActivities()
+        .filter(
+          (activity) =>
+            activity.threadId === "thread-one" &&
+            activity.lifecycle === "pending",
+        );
+      expect(pending.map((activity) => activity.sourceKey)).toEqual(
+        expect.arrayContaining([
+          "request:process-one:connection-1:thread-one:700:pending",
+          "request:process-two:connection-1:thread-one:700:pending",
+        ]),
+      );
+    });
+  });
+
   it("fails visibly and schedules reconnect when the fixed child is unavailable", async () => {
     database = openDatabase({ path: ":memory:" });
     service = new ObserverService({
@@ -128,15 +181,15 @@ describe("ObserverService", () => {
       repository: new ObserverRepository(database.connection),
       executable: "/definitely/not/a/codex-binary",
       requestTimeoutMs: 100,
-      reconnectBaseMs: 1_000,
+      reconnectBaseMs: 2_000,
       reconnectMaxMs: 2_000,
-      random: () => 0,
+      random: () => 1,
       setTimer,
       clearTimer,
     });
     await service.start();
     await vi.waitFor(() => {
-      expect(service?.operationalDiagnostics().reconnectBackoffMs).toBe(800);
+      expect(service?.operationalDiagnostics().reconnectBackoffMs).toBe(2_000);
     });
     await service.stop();
     expect(scheduled.size).toBe(0);

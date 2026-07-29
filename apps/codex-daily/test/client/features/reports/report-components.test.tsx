@@ -1,13 +1,14 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReportSnapshot } from "../../../../src/shared/report";
 import { ReportDigest } from "../../../../src/client/features/reports/ReportDigest";
 import { ReportPreview } from "../../../../src/client/features/reports/ReportPreview";
 
 const reportMocks = vi.hoisted(() => ({
   generate: vi.fn(),
+  lastFailure: null as string | null,
 }));
 
 vi.mock("../../../../src/client/data/report-context", () => ({
@@ -21,7 +22,7 @@ vi.mock("../../../../src/client/data/report-context", () => ({
       },
       nextRunAt: "2026-07-29T16:00:00.000Z",
       lastAutomaticRunAt: null,
-      lastFailure: null,
+      lastFailure: reportMocks.lastFailure,
     },
     loading: false,
     pending: false,
@@ -81,7 +82,26 @@ const snapshot: ReportSnapshot = {
   },
 };
 
+afterEach(() => {
+  cleanup();
+  reportMocks.lastFailure = null;
+  reportMocks.generate.mockReset();
+});
+
 describe("report components", () => {
+  it("surfaces an automatic-run failure beside manual recovery", () => {
+    reportMocks.lastFailure = "Automatic report generation failed.";
+    render(
+      <MemoryRouter>
+        <ReportPreview />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Automatic report generation failed.",
+    );
+    expect(screen.getByRole("button", { name: "Generate report" })).toBeEnabled();
+    reportMocks.lastFailure = null;
+  });
   it("labels generated suggestions with their target task", () => {
     render(<ReportDigest snapshot={snapshot} />);
     expect(

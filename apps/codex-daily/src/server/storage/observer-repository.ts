@@ -97,7 +97,7 @@ export class ObserverRepository {
     }
   }
 
-  upsertThread(thread: ObservedThread): boolean {
+  upsertThread(thread: ObservedThread, allowEqualTimestamp = false): boolean {
     if (this.isExcluded(thread.id)) return false;
     const result = this.db
       .prepare(`
@@ -121,7 +121,8 @@ export class ObserverRepository {
           waiting_on_approval = excluded.waiting_on_approval,
           waiting_on_user_input = excluded.waiting_on_user_input,
           last_activity_at = COALESCE(excluded.last_activity_at, observed_threads.last_activity_at)
-        WHERE excluded.updated_at >= observed_threads.updated_at
+        WHERE excluded.updated_at > observed_threads.updated_at
+           OR (? = 1 AND excluded.updated_at = observed_threads.updated_at)
       `)
       .run(
         thread.id,
@@ -139,6 +140,7 @@ export class ObserverRepository {
         Number(thread.waitingOnApproval),
         Number(thread.waitingOnUserInput),
         thread.lastActivityAt,
+        Number(allowEqualTimestamp),
       );
     return result.changes > 0;
   }
@@ -249,6 +251,21 @@ export class ObserverRepository {
         LIMIT ?
       `)
       .all(limit) as unknown as ActivityRow[];
+    return rows.map(mapActivity);
+  }
+
+  listActivitiesForThread(threadId: string, limit = 1_000): ObservedActivity[] {
+    const rows = this.db
+      .prepare(`
+        SELECT activities.*
+        FROM observed_activities activities
+        LEFT JOIN observer_thread_exclusions exclusions
+          ON exclusions.thread_id = activities.thread_id
+        WHERE activities.thread_id = ? AND exclusions.thread_id IS NULL
+        ORDER BY activities.occurred_at DESC, activities.source_key
+        LIMIT ?
+      `)
+      .all(threadId, limit) as unknown as ActivityRow[];
     return rows.map(mapActivity);
   }
 

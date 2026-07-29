@@ -21,6 +21,7 @@ import {
   transitionTask,
   updateTask,
 } from "../api/planning-client";
+import { REPORT_SCHEDULE_CHANGED_EVENT } from "./invalidation";
 
 interface PlanningData {
   view: PlanningView | null;
@@ -48,8 +49,14 @@ export function PlanningProvider({ children }: PropsWithChildren) {
   const reload = useCallback(() => {
     setLoading(true);
     setError(null);
+    setView(null);
     setRequestNumber((value) => value + 1);
   }, []);
+
+  useEffect(() => {
+    window.addEventListener(REPORT_SCHEDULE_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(REPORT_SCHEDULE_CHANGED_EVENT, reload);
+  }, [reload]);
 
   useEffect(() => {
     let active = true;

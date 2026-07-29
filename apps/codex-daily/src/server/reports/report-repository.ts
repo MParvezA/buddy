@@ -363,6 +363,18 @@ export class ReportRepository {
       .run(now, snapshotId);
   }
 
+  failPendingNarratives(failure: string, now: string): number {
+    return Number(
+      this.db
+        .prepare(`
+          UPDATE report_narratives
+          SET status = 'failed', narrative_text = NULL, failure_code = ?, updated_at = ?
+          WHERE status = 'pending'
+        `)
+        .run(failure.slice(0, 120), now).changes,
+    );
+  }
+
   saveNarrative(
     snapshotId: string,
     text: string,

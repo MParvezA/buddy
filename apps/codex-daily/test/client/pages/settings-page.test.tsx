@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -87,6 +87,33 @@ afterEach(() => {
 });
 
 describe("Settings local-data controls", () => {
+  it("does not expose editable defaults while retained settings are still loading", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === "/api/report-settings") {
+          return new Promise<Response>(() => undefined);
+        }
+        if (String(input) === "/api/operations/diagnostics") {
+          return response(diagnostics);
+        }
+        return response({});
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText("Evening report time")).toBeDisabled();
+    expect(screen.getByLabelText("Evening report time")).toHaveValue("");
+    expect(screen.getByLabelText("IANA timezone")).toBeDisabled();
+    expect(screen.getByLabelText("IANA timezone")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Save report settings" })).toBeDisabled();
+    expect(screen.getByText("Loading retained report settings…")).toBeVisible();
+  });
+
   it("shows bounded diagnostics and restores focus after a keyboard-cancelled dialog", async () => {
     const user = userEvent.setup();
     render(
@@ -115,5 +142,56 @@ describe("Settings local-data controls", () => {
     expect(dialog).not.toBeInTheDocument();
     await vi.waitFor(() => expect(opener).toHaveFocus());
   });
-});
 
+  it("keeps deletion failures inside the open confirmation dialog", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === "/api/report-settings") {
+          return response({
+            schedule: diagnostics.schedule,
+            nextRunAt: diagnostics.scheduler.nextRunAt,
+            lastAutomaticRunAt: null,
+            lastFailure: null,
+          });
+        }
+        if (String(input) === "/api/operations/diagnostics") {
+          return response(diagnostics);
+        }
+        if (
+          String(input) === "/api/operations/data" &&
+          init?.method === "DELETE"
+        ) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { message: "Deletion could not finish." } }),
+              {
+                status: 500,
+                headers: { "content-type": "application/json" },
+              },
+            ),
+          );
+        }
+        return response({});
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    await screen.findByDisplayValue("Europe/Berlin");
+    await user.click(screen.getByRole("button", { name: "Delete all local data" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete all local data?" });
+    await user.type(
+      screen.getByLabelText("Confirmation"),
+      "DELETE ALL CODEX DAILY DATA",
+    );
+    await user.click(screen.getByRole("button", { name: "Delete local data" }));
+
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "Deletion could not finish.",
+    );
+  });
+});

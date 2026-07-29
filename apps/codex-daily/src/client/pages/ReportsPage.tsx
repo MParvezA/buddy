@@ -7,13 +7,28 @@ import { useReports } from "../data/report-context";
 export function ReportsPage() {
   const reports = useReports();
   const [history, setHistory] = useState<ReportSnapshot[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    let active = true;
     listReports()
-      .then(setHistory)
-      .catch((reason: unknown) =>
-        setError(reason instanceof Error ? reason.message : "Report history could not load."),
-      );
+      .then((value) => {
+        if (active) {
+          setHistory(value);
+          setError(null);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(reason instanceof Error ? reason.message : "Report history could not load.");
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [reports.latest]);
   return (
     <article className="secondary-page">
@@ -26,7 +41,8 @@ export function ReportsPage() {
         </div>
       </header>
       {error && <p className="inline-notice" role="alert">{error}</p>}
-      {history.length ? (
+      {loading && <p className="state-panel" role="status">Loading report history…</p>}
+      {!loading && !error && history.length ? (
         <div className="report-history">
           {history.map((snapshot) => (
             <Link className="panel report-history-card" key={snapshot.id} to={`/reports/${snapshot.id}`}>
@@ -41,14 +57,14 @@ export function ReportsPage() {
             </Link>
           ))}
         </div>
-      ) : (
+      ) : !loading && !error ? (
         <section className="panel empty-page">
           <span className="large-symbol" aria-hidden="true">≡</span>
           <h2>No saved reports yet</h2>
           <p>Generate a factual snapshot from Today or wait for the scheduled run.</p>
           <Link className="secondary-button link-button" to="/">Go to Today</Link>
         </section>
-      )}
+      ) : null}
     </article>
   );
 }

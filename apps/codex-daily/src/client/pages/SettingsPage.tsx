@@ -1,6 +1,7 @@
 import {
   type FormEvent,
   type KeyboardEvent,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -20,16 +21,12 @@ import {
   deleteLocalDay,
   getOperationsDiagnostics,
 } from "../api/operations-client";
-
-const defaults: ReportSchedule = {
-  time: "18:00",
-  timezone: "Europe/Berlin",
-  narrativeEnabled: false,
-};
+import { REPORT_SCHEDULE_CHANGED_EVENT } from "../data/invalidation";
 
 export function SettingsPage() {
-  const [form, setForm] = useState(defaults);
+  const [form, setForm] = useState<ReportSchedule | null>(null);
   const [state, setState] = useState<ReportSchedulerState | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<OperationsDiagnostics | null>(null);
@@ -38,19 +35,43 @@ export function SettingsPage() {
   const [deleteDate, setDeleteDate] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [deletionError, setDeletionError] = useState<string | null>(null);
   const deleteDayButton = useRef<HTMLButtonElement>(null);
   const deleteAllButton = useRef<HTMLButtonElement>(null);
   const confirmationInput = useRef<HTMLInputElement>(null);
   const dialogElement = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  const loadSettings = useCallback(() => {
+    setSettingsLoading(true);
+    setError(null);
     getReportSettings()
       .then((result) => {
         setState(result);
         setForm(result.schedule);
       })
-      .catch((reason: unknown) =>
-        setError(reason instanceof Error ? reason.message : "Settings could not load."),
-      );
+      .catch((reason: unknown) => {
+        setState(null);
+        setForm(null);
+        setError(reason instanceof Error ? reason.message : "Settings could not load.");
+      })
+      .finally(() => setSettingsLoading(false));
+  }, []);
+  useEffect(() => {
+    let active = true;
+    getReportSettings()
+      .then((result) => {
+        if (!active) return;
+        setState(result);
+        setForm(result.schedule);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setState(null);
+        setForm(null);
+        setError(reason instanceof Error ? reason.message : "Settings could not load.");
+      })
+      .finally(() => {
+        if (active) setSettingsLoading(false);
+      });
     getOperationsDiagnostics()
       .then((result) => {
         setDiagnostics(result);
@@ -61,12 +82,16 @@ export function SettingsPage() {
           reason instanceof Error ? reason.message : "Diagnostics could not load.",
         ),
       );
+    return () => {
+      active = false;
+    };
   }, []);
   useEffect(() => {
     if (dialog) confirmationInput.current?.focus();
   }, [dialog]);
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (!form) return;
     setStatus(null);
     setError(null);
     try {
@@ -74,6 +99,7 @@ export function SettingsPage() {
       setState(result);
       setForm(result.schedule);
       setStatus("Report schedule saved.");
+      window.dispatchEvent(new Event(REPORT_SCHEDULE_CHANGED_EVENT));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Settings could not be saved.");
     }
@@ -81,19 +107,21 @@ export function SettingsPage() {
   function openDialog(kind: "day" | "all") {
     setConfirmation("");
     setOperationsError(null);
+    setDeletionError(null);
     setDialog(kind);
   }
   function closeDialog() {
     const opener = dialog === "day" ? deleteDayButton : deleteAllButton;
     setDialog(null);
     setConfirmation("");
+    setDeletionError(null);
     window.setTimeout(() => opener.current?.focus(), 0);
   }
   async function confirmDeletion(event: FormEvent) {
     event.preventDefault();
     if (!dialog) return;
     setDeleting(true);
-    setOperationsError(null);
+    setDeletionError(null);
     try {
       if (dialog === "day") {
         await deleteLocalDay(deleteDate, confirmation);
@@ -102,7 +130,7 @@ export function SettingsPage() {
       }
       window.location.reload();
     } catch (reason) {
-      setOperationsError(
+      setDeletionError(
         reason instanceof Error ? reason.message : "Local data could not be deleted.",
       );
       setDeleting(false);
@@ -144,37 +172,66 @@ export function SettingsPage() {
         </div>
       </header>
       <form className="panel report-settings" onSubmit={(event) => void submit(event)}>
-        <label>
-          Evening report time
-          <input
-            type="time"
-            required
-            value={form.time}
-            onChange={(event) => setForm({ ...form, time: event.target.value })}
-          />
-        </label>
-        <label>
-          IANA timezone
-          <input
-            required
-            value={form.timezone}
-            onChange={(event) => setForm({ ...form, timezone: event.target.value })}
-            placeholder="Europe/Berlin"
-          />
-        </label>
-        <label className="check-label">
-          <input
-            type="checkbox"
-            checked={form.narrativeEnabled}
-            onChange={(event) =>
-              setForm({ ...form, narrativeEnabled: event.target.checked })
-            }
-          />
-          Add optional Codex-generated interpretation
-        </label>
-        <button className="secondary-button" type="submit">Save report settings</button>
+        <fieldset disabled={settingsLoading || !form}>
+          <label>
+            Evening report time
+            <input
+              type="time"
+              required
+              value={form?.time ?? ""}
+              onChange={(event) =>
+                setForm((current) =>
+                  current ? { ...current, time: event.target.value } : current,
+                )
+              }
+            />
+          </label>
+          <label>
+            IANA timezone
+            <input
+              required
+              value={form?.timezone ?? ""}
+              onChange={(event) =>
+                setForm((current) =>
+                  current ? { ...current, timezone: event.target.value } : current,
+                )
+              }
+              placeholder="Loading retained timezone…"
+            />
+          </label>
+          <label className="check-label">
+            <input
+              type="checkbox"
+              checked={form?.narrativeEnabled ?? false}
+              onChange={(event) =>
+                setForm((current) =>
+                  current
+                    ? { ...current, narrativeEnabled: event.target.checked }
+                    : current,
+                )
+              }
+            />
+            Add optional Codex-generated interpretation
+          </label>
+          <button className="secondary-button" type="submit">
+            Save report settings
+          </button>
+        </fieldset>
+        {settingsLoading && <p role="status">Loading retained report settings…</p>}
         {status && <p role="status">{status}</p>}
-        {error && <p className="inline-notice" role="alert">{error}</p>}
+        {error && (
+          <div className="inline-notice" role="alert">
+            <p>{error} Editing remains disabled until retained settings load.</p>
+            <button className="text-button" type="button" onClick={loadSettings}>
+              Retry settings load
+            </button>
+          </div>
+        )}
+        {state?.lastFailure && (
+          <p className="inline-notice" role="alert">
+            {state.lastFailure} You can generate a factual report manually from Today.
+          </p>
+        )}
         {state && (
           <small>Next automatic run: {new Date(state.nextRunAt).toLocaleString()}</small>
         )}
@@ -349,6 +406,9 @@ export function SettingsPage() {
                   autoComplete="off"
                 />
               </label>
+              {deletionError && (
+                <p className="inline-notice" role="alert">{deletionError}</p>
+              )}
               <div className="dialog-actions">
                 <button type="button" className="secondary-button" onClick={closeDialog}>
                   Cancel

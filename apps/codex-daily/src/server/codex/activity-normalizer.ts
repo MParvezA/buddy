@@ -163,6 +163,7 @@ const APPROVAL_METHODS = new Map([
 export function normalizeMessage(
   envelope: ProtocolMethodEnvelope,
   now: () => Date,
+  requestEpisodeNamespace?: string,
 ): NormalizedMessage {
   const method = envelope.method;
   if (method === "thread/started") {
@@ -263,9 +264,12 @@ export function normalizeMessage(
       isObject(params) && typeof params.turnId === "string" ? params.turnId : null;
     const itemId =
       isObject(params) && typeof params.itemId === "string" ? params.itemId : null;
+    const requestPrefix = requestEpisodeNamespace
+      ? `request:${requestEpisodeNamespace}:${threadId}`
+      : `request:${threadId}`;
     return {
       activity: activity({
-        sourceKey: `request:${threadId}:${String(envelope.id)}:pending`,
+        sourceKey: `${requestPrefix}:${String(envelope.id)}:pending`,
         threadId,
         turnId,
         itemId,
@@ -281,9 +285,12 @@ export function normalizeMessage(
   }
   if (method === "item/tool/requestUserInput" || method === "mcpServer/elicitation/request") {
     const threadId = stringField(envelope.params, "threadId");
+    const requestPrefix = requestEpisodeNamespace
+      ? `request:${requestEpisodeNamespace}:${threadId}`
+      : `request:${threadId}`;
     return {
       activity: activity({
-        sourceKey: `request:${threadId}:${String(envelope.id)}:pending`,
+        sourceKey: `${requestPrefix}:${String(envelope.id)}:pending`,
         threadId,
         turnId: optionalString(envelope.params, "turnId"),
         itemId:
@@ -310,9 +317,12 @@ export function normalizeMessage(
         : (() => {
             throw new Error("Codex App Server requestId field is invalid.");
           })();
+    const requestPrefix = requestEpisodeNamespace
+      ? `request:${requestEpisodeNamespace}:${threadId}`
+      : `request:${threadId}`;
     return {
       activity: activity({
-        sourceKey: `request:${threadId}:${String(requestId)}:resolved`,
+        sourceKey: `${requestPrefix}:${String(requestId)}:resolved`,
         threadId,
         occurredAt: now().toISOString(),
         category: "input_request",

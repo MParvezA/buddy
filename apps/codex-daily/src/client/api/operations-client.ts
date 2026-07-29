@@ -30,10 +30,8 @@ export const deleteLocalDay = (localDate: string, confirmation: string) =>
     method: "DELETE",
     body: JSON.stringify({ confirmation }),
   });
-
 export const deleteAllLocalData = (confirmation: string) =>
   request<DeleteResult>("/api/operations/data", {
     method: "DELETE",
     body: JSON.stringify({ confirmation }),
   });
-

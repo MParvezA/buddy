@@ -193,4 +193,57 @@ describe("report scheduler", () => {
     expect(callback).toBeNull();
     expect(repository.listSnapshots()).toHaveLength(1);
   });
+
+  it("exposes missed factual recovery without awaiting optional narrative", async () => {
+    database = openDatabase({ path: ":memory:" });
+    const repository = new ReportRepository(database.connection);
+    let resolveNarrative!: () => void;
+    const narrativeWait = new Promise<void>((resolve) => {
+      resolveNarrative = resolve;
+    });
+    const service = new ReportService(
+      repository,
+      () => new Date("2026-07-29T17:00:00.000Z"),
+      {
+        generate: async () => {
+          await narrativeWait;
+          return {
+            reportingThreadId: "reporting-thread",
+            text: "Recovered narrative",
+            suggestions: [],
+          };
+        },
+      },
+    );
+    service.updateSchedule({
+      time: "18:00",
+      timezone: "Europe/Berlin",
+      narrativeEnabled: true,
+    });
+    const scheduler = new ReportScheduler({
+      service,
+      repository,
+      clock: () => new Date("2026-07-29T17:00:00.000Z"),
+      setTimer: (() => ({ fake: true })) as unknown as typeof setTimeout,
+      clearTimer: (() => undefined) as unknown as typeof clearTimeout,
+    });
+
+    const start = scheduler.start();
+    const outcome = await Promise.race([
+      start.then(() => "facts-visible"),
+      new Promise<"narrative-blocked">((resolve) =>
+        setTimeout(() => resolve("narrative-blocked"), 20),
+      ),
+    ]);
+    const factualSnapshot = repository.listSnapshots()[0];
+    resolveNarrative();
+    await start;
+    expect(outcome).toBe("facts-visible");
+    expect(factualSnapshot).toMatchObject({
+      trigger: "missed_recovery",
+      narrative: { status: "pending" },
+    });
+    await scheduler.stopAndDrain();
+    expect(repository.listSnapshots()[0]?.narrative.status).toBe("ready");
+  });
 });

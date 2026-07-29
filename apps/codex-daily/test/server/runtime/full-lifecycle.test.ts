@@ -20,7 +20,6 @@ afterEach(async () => {
   if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
   temporaryDirectory = undefined;
 });
-
 async function open(localDate: string, databasePath: string, observer: boolean) {
   return buildApp({
     serveStatic: false,
@@ -146,4 +145,3 @@ describe("morning-to-next-morning lifecycle", () => {
     expect(afterRestart.json().reports).toHaveLength(1);
   });
 });
-

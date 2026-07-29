@@ -87,7 +87,7 @@ collide with the earlier durable key and disappear.
 but the write coordinator exempts every GET. A dashboard load can therefore write
 while exclusive deletion considers ingestion quiescent.
 
-- Evidence: `src/server/app.ts:139-145` exempts GET; 
+- Evidence: `src/server/app.ts:139-145` exempts GET;
   `src/server/planning/planning-service.ts:65-69` writes via `ensureDay`.
 - Required correction: track this route as a writer or make planning reads
   genuinely read-only, with a concurrent deletion regression test.
@@ -188,3 +188,35 @@ review correction.
 - Protected `buddy_*` and `docs/contracts` diff: empty.
 - `git diff --check d3f0185^..0b43951`: failed on eight blank lines at EOF.
 
+## Correction Implementation
+
+Status: implemented; repeat review required.
+
+All R1–R9 findings and the bounded should-fix items above have been corrected.
+The server now enforces a same-origin loopback boundary, keeps transient thread
+detail non-cacheable, preserves deletion consistency, recovers interrupted
+narratives without delaying factual reports, and gives request episodes
+process-unique connection identities. Planning reads are read-only, Settings
+waits for retained state, timezone changes invalidate date-sensitive providers,
+and automatic report failures are visible with a manual recovery path.
+
+The correction also clamps reconnect jitter, rejects equal-timestamp inventory
+regressions, provides a per-thread activity timeline, makes error/loading states
+truthful, isolates browser scenarios, moves the deterministic clock to a
+test-only entry point, bounds and renames the active/recent chat section,
+expands responsive and keyboard evidence, and removes the recorded whitespace
+errors.
+
+Correction verification:
+
+- `npm run check`: passed; 30 files and 96 tests.
+- `npm run test:e2e`: passed independently; 16 passed and 6 intentional mobile
+  mutation duplicates skipped.
+- Isolated report-regeneration Playwright scenario: passed from fresh state.
+- `python3 -m pytest buddy_bringup/test/test_repository_contracts.py`: 4 passed.
+- `colcon list`: unchanged 16 packages.
+- Protected `buddy_*` and `docs/contracts` diff: empty.
+- `git diff --check`: passed.
+
+Next action: commit the correction implementation and repeat `5_Review` against
+that exact commit before cleanup.

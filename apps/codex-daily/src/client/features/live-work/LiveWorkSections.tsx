@@ -89,7 +89,17 @@ export function LiveWorkSections() {
   const observer = useObserver();
   const planning = usePlanning();
   const timezone = planning.view?.timezone ?? "Europe/Berlin";
-  const threads = observer.snapshot?.threads.filter((thread) => !thread.archived) ?? [];
+  const observedThreads =
+    observer.snapshot?.threads.filter((thread) => !thread.archived) ?? [];
+  const threads = [...observedThreads]
+    .sort(
+      (left, right) =>
+        Number(right.runtime === "active") - Number(left.runtime === "active") ||
+        (right.recencyAt ?? right.updatedAt).localeCompare(
+          left.recencyAt ?? left.updatedAt,
+        ),
+    )
+    .slice(0, 20);
   const recent = (observer.snapshot?.activities ?? [])
     .filter((item) => item.category === "turn" && item.lifecycle === "completed")
     .slice(0, 8);
@@ -100,9 +110,9 @@ export function LiveWorkSections() {
         <div className="section-heading">
           <div>
             <p className="eyebrow">Priority 03</p>
-            <h2 id="active-title">Active Codex chats</h2>
+            <h2 id="active-title">Active and recent Codex chats</h2>
           </div>
-          <span className="count-pill neutral">{threads.length} observed</span>
+          <span className="count-pill neutral">{observedThreads.length} observed</span>
         </div>
         {observer.error && <p className="inline-notice" role="status">{observer.error}</p>}
         {observer.loading && <p className="quiet-copy">Loading observed Codex metadata…</p>}
@@ -136,6 +146,11 @@ export function LiveWorkSections() {
             );
           })}
         </ul>
+        {observedThreads.length > threads.length && (
+          <p className="section-hint">
+            Showing the 20 most relevant chats, with active chats first.
+          </p>
+        )}
       </section>
 
       <section className="panel" data-section-order="4" aria-labelledby="completed-title">

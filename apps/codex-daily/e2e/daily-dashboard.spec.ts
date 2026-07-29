@@ -13,7 +13,7 @@ test("built app preserves the daily hierarchy without horizontal overflow", asyn
   expect(sectionHeadings).toEqual([
     "Needs your attention",
     "Today’s outcomes and progress",
-    "Active Codex chats",
+    "Active and recent Codex chats",
     "Recently completed work",
     "Evening report",
   ]);
@@ -50,4 +50,46 @@ test("built app routes through thread, report, settings, and back to Today", asy
   await page.getByRole("link", { name: "Back to Today" }).click();
   await expect(page).toHaveURL("/");
   await expect(page.getByRole("heading", { name: "Needs your attention" })).toBeVisible();
+});
+
+test("disconnected monitoring keeps planning and report history usable", async ({
+  page,
+}) => {
+  await page.route("**/api/observer", async (route) => {
+    await route.fulfill({
+      json: {
+        health: {
+          state: "disconnected",
+          capability: "shared_live",
+          lastSuccessfulSyncAt: "2026-07-29T10:00:00.000Z",
+          lastInventoryRefreshAt: "2026-07-29T10:00:00.000Z",
+          diagnostic: "Codex is temporarily unavailable.",
+        },
+        threads: [],
+        activities: [],
+        taskLinks: [],
+      },
+    });
+  });
+  await page.route("**/api/observer/events", (route) => route.abort());
+  await page.route("**/api/attention", async (route) => {
+    await route.fulfill({
+      json: {
+        capability: "shared_live",
+        connectionState: "disconnected",
+        liveRequestCoverage: "available",
+        items: [],
+      },
+    });
+  });
+  await page.route("**/api/attention/events", (route) => route.abort());
+
+  await page.goto("/");
+  await expect(page.getByText("Codex disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByText(/last-known queue/)).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Today’s outcomes and progress" }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Reports" }).click();
+  await expect(page.getByRole("heading", { name: "Report history" })).toBeVisible();
 });

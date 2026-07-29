@@ -81,6 +81,7 @@ export interface ObserverSseEvent {
  */
 export interface TransientThreadDetail {
   thread: ObservedThread;
+  activities: ObservedActivity[];
   turns: unknown[];
   fetchedAt: string;
 }

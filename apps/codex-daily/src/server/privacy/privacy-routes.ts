@@ -8,7 +8,6 @@ import {
 function failure(reply: FastifyReply, status: number, code: string, message: string) {
   return reply.code(status).send({ error: { code, message } });
 }
-
 export async function registerPrivacyRoutes(
   app: FastifyInstance,
   privacy: PrivacyService,
@@ -53,4 +52,3 @@ export async function registerPrivacyRoutes(
     },
   );
 }
-

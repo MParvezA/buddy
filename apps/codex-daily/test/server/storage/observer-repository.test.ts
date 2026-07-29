@@ -110,6 +110,39 @@ describe("ObserverRepository", () => {
     database.close();
   });
 
+  it("does not let equal-timestamp inventory overwrite newer live state", () => {
+    const database = openDatabase({ path: ":memory:" });
+    const observer = new ObserverRepository(database.connection);
+    observer.upsertThread({
+      ...thread,
+      title: "Live title",
+      runtime: "active",
+    });
+    expect(
+      observer.upsertThread({
+        ...thread,
+        title: "Stale inventory title",
+        runtime: "idle",
+      }),
+    ).toBe(false);
+    expect(observer.findThread(thread.id)).toMatchObject({
+      title: "Live title",
+      runtime: "active",
+    });
+    expect(
+      observer.upsertThread(
+        {
+          ...thread,
+          title: "New live title",
+          runtime: "active",
+        },
+        true,
+      ),
+    ).toBe(true);
+    expect(observer.findThread(thread.id)?.title).toBe("New live title");
+    database.close();
+  });
+
   it("keeps reused server request IDs distinct and resolves them within each thread", () => {
     const database = openDatabase({ path: ":memory:" });
     const observer = new ObserverRepository(database.connection);

@@ -62,6 +62,7 @@ export async function registerObserverRoutes(
   app.get<{ Params: ThreadParams }>(
     "/api/observer/threads/:threadId",
     async (request, reply) => {
+      reply.header("cache-control", "no-store");
       if (!validId(request.params.threadId)) return invalid(reply);
       try {
         return await observer.detail(request.params.threadId);

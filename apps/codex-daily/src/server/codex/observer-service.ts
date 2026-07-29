@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
 import type {
   ObserverConnectionHealth,
   ObserverMode,
@@ -33,6 +34,7 @@ export interface ObserverServiceOptions {
   random?: () => number;
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
+  processInstanceId?: string;
 }
 
 export class ObserverUnavailableError extends Error {}
@@ -53,6 +55,7 @@ export class ObserverService extends EventEmitter {
   private readonly random: () => number;
   private readonly setTimer: typeof setTimeout;
   private readonly clearTimer: typeof clearTimeout;
+  private readonly processInstanceId: string;
   private client: AppServerClient | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private inventoryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -66,9 +69,15 @@ export class ObserverService extends EventEmitter {
   private lastErrorCategory: string | null = null;
   private lastErrorAt: string | null = null;
   private health: ObserverConnectionHealth;
-  private reportingThreadCreationBuffer: ProtocolMethodEnvelope[] | null = null;
+  private reportingThreadCreationBuffer:
+    | Array<{
+        envelope: ProtocolMethodEnvelope;
+        requestEpisodeNamespace: string;
+      }>
+    | null = null;
   private reportingThreadCreation: Promise<string> | null = null;
   private inventoryCreationTail: Promise<void> = Promise.resolve();
+  private connectionGeneration = 0;
 
   constructor(options: ObserverServiceOptions) {
     super();
@@ -104,6 +113,12 @@ export class ObserverService extends EventEmitter {
     this.random = options.random ?? Math.random;
     this.setTimer = options.setTimer ?? setTimeout;
     this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.processInstanceId = options.processInstanceId ?? randomUUID();
+    if (
+      !/^[A-Za-z0-9._-]{1,100}$/.test(this.processInstanceId)
+    ) {
+      throw new Error("Observer process instance ID is invalid.");
+    }
     this.health = {
       state: "disconnected",
       capability: this.mode,
@@ -179,6 +194,7 @@ export class ObserverService extends EventEmitter {
     }
     return {
       thread: stored,
+      activities: this.repository.listActivitiesForThread(threadId),
       // This is intentionally the sole pass-through of sensitive protocol content.
       // No repository method accepts it and snapshot/SSE DTOs cannot contain it.
       turns: rawThread.turns,
@@ -345,6 +361,8 @@ export class ObserverService extends EventEmitter {
       setTimer: this.setTimer,
       clearTimer: this.clearTimer,
     });
+    const requestEpisodeNamespace =
+      `${this.processInstanceId}:connection-${++this.connectionGeneration}`;
     this.client = client;
     let failed = false;
     const disconnect = (error: Error) => {
@@ -357,10 +375,13 @@ export class ObserverService extends EventEmitter {
     client.on("message", (envelope: ProtocolMethodEnvelope) => {
       try {
         if (this.reportingThreadCreationBuffer) {
-          this.reportingThreadCreationBuffer.push(envelope);
+          this.reportingThreadCreationBuffer.push({
+            envelope,
+            requestEpisodeNamespace,
+          });
           return;
         }
-        this.ingest(envelope);
+        this.ingest(envelope, requestEpisodeNamespace);
       } catch (error) {
         disconnect(
           error instanceof Error
@@ -399,14 +420,14 @@ export class ObserverService extends EventEmitter {
   private replayReportingCreationBuffer(reportingThreadId: string | null): void {
     const buffered = this.reportingThreadCreationBuffer ?? [];
     this.reportingThreadCreationBuffer = null;
-    for (const envelope of buffered) {
+    for (const { envelope, requestEpisodeNamespace } of buffered) {
       if (
         reportingThreadId &&
         protocolThreadId(envelope) === reportingThreadId
       ) {
         continue;
       }
-      this.ingest(envelope);
+      this.ingest(envelope, requestEpisodeNamespace);
     }
   }
 
@@ -472,11 +493,18 @@ export class ObserverService extends EventEmitter {
     }
   }
 
-  private ingest(envelope: ProtocolMethodEnvelope): void {
-    const normalized = normalizeMessage(envelope, this.clock);
+  private ingest(
+    envelope: ProtocolMethodEnvelope,
+    requestEpisodeNamespace?: string,
+  ): void {
+    const normalized = normalizeMessage(
+      envelope,
+      this.clock,
+      requestEpisodeNamespace,
+    );
     let changed = false;
     if (normalized.thread && !this.repository.isExcluded(normalized.thread.id)) {
-      changed = this.repository.upsertThread(normalized.thread) || changed;
+      changed = this.repository.upsertThread(normalized.thread, true) || changed;
     }
     if (normalized.runtime && !this.repository.isExcluded(normalized.runtime.threadId)) {
       this.repository.updateRuntime(
@@ -543,7 +571,10 @@ export class ObserverService extends EventEmitter {
       this.reconnectMaxMs,
       this.reconnectBaseMs * 2 ** Math.max(0, this.reconnectAttempt - 1),
     );
-    const delay = Math.round(base * (0.8 + this.random() * 0.4));
+    const delay = Math.min(
+      this.reconnectMaxMs,
+      Math.round(base * (0.8 + this.random() * 0.4)),
+    );
     this.reconnectBackoffMs = delay;
     this.reconnectTimer = this.setTimer(() => {
       this.reconnectTimer = null;

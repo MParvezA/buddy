@@ -38,6 +38,8 @@ export class ReportNotFoundError extends Error {}
 export class ReportConflictError extends Error {}
 
 export class ReportService {
+  private readonly activeNarratives = new Set<Promise<ReportSnapshot>>();
+
   constructor(
     private readonly repository: ReportRepository,
     private readonly clock: () => Date = () => new Date(),
@@ -82,6 +84,7 @@ export class ReportService {
   async generate(
     localDate: string,
     trigger: ReportTrigger = "manual",
+    waitForNarrative = true,
   ): Promise<ReportSnapshot | null> {
     const schedule = this.schedule();
     const now = this.clock().toISOString();
@@ -106,8 +109,22 @@ export class ReportService {
       if (error instanceof AutomaticReportAlreadyExistsError) return null;
       throw error;
     }
-    if (schedule.narrativeEnabled) await this.performNarrative(snapshot);
+    if (schedule.narrativeEnabled) {
+      const narrative = this.trackNarrative(snapshot);
+      if (waitForNarrative) await narrative;
+    }
     return this.find(snapshot.id);
+  }
+
+  recoverOrphanedNarratives(): number {
+    return this.repository.failPendingNarratives(
+      "Codex narrative was interrupted by restart",
+      this.clock().toISOString(),
+    );
+  }
+
+  async drainNarratives(): Promise<void> {
+    await Promise.allSettled([...this.activeNarratives]);
   }
 
   async generateNarrative(snapshotId: string): Promise<ReportSnapshot> {
@@ -124,6 +141,13 @@ export class ReportService {
     }
     this.repository.markNarrativePending(snapshotId, this.clock().toISOString());
     return this.performNarrative(snapshot);
+  }
+
+  private trackNarrative(snapshot: ReportSnapshot): Promise<ReportSnapshot> {
+    const running = this.performNarrative(snapshot);
+    this.activeNarratives.add(running);
+    void running.finally(() => this.activeNarratives.delete(running));
+    return running;
   }
 
   private async performNarrative(snapshot: ReportSnapshot): Promise<ReportSnapshot> {

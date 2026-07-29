@@ -65,7 +65,6 @@ export class PlanningService {
   view(requestedDate?: string): PlanningView {
     const localDate = assertLocalDate(requestedDate ?? this.today());
     const priorDate = priorLocalDate(localDate);
-    this.repository.ensureDay(localDate, this.now(), this.timezone);
     const unresolvedTasks = this.repository.listUnresolved(priorDate);
     return {
       localDate,

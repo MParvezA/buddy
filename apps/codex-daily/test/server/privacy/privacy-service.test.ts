@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AttentionRepository } from "../../../src/server/attention/attention-repository.js";
+import { AttentionEngine } from "../../../src/server/attention/attention-engine.js";
 import { PrivacyService } from "../../../src/server/privacy/privacy-service.js";
 import { ReportRepository } from "../../../src/server/reports/report-repository.js";
 import { ReportService } from "../../../src/server/reports/report-service.js";
@@ -231,6 +232,29 @@ describe("local monitor privacy operations", () => {
     expect(value.planning.findTask(source.id)).toBeNull();
     expect(value.planning.findTask(successor.id)?.originTaskId).toBeNull();
     expect(value.observer.listActivities()).toEqual([]);
+    expect(value.observer.findThread("thread-one")?.lastActivityAt).toBeNull();
+    value.observer.updateRuntime(
+      "thread-one",
+      "active",
+      false,
+      false,
+      "2026-07-30T10:00:00.000Z",
+    );
+    new AttentionEngine(
+      value.attention,
+      () => new Date("2026-07-30T10:31:00.000Z"),
+    ).reconcile({
+      health: {
+        state: "connected",
+        capability: "shared_live",
+        lastSuccessfulSyncAt: "2026-07-30T10:31:00.000Z",
+        lastInventoryRefreshAt: "2026-07-30T10:31:00.000Z",
+        diagnostic: null,
+      },
+      threads: value.observer.listThreads(),
+      activities: value.observer.listActivities(),
+      taskLinks: value.observer.listLinks(),
+    });
     expect(value.attention.listOpen()).toEqual([]);
     expect(value.reports.listSnapshots()).toEqual([]);
     expect(value.observer.findThread("thread-one")).not.toBeNull();

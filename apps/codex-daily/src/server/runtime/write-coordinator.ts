@@ -54,4 +54,3 @@ export class WriteCoordinator {
     await new Promise<void>((resolve) => this.drainWaiters.add(resolve));
   }
 }
-

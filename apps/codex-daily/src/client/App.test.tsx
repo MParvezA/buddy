@@ -160,6 +160,7 @@ function mockSuccessfulApi() {
         return Promise.resolve(
           jsonResponse({
             thread: observer.threads[0],
+            activities: observer.activities,
             turns: [{ id: "turn-1" }],
             fetchedAt: "2026-07-29T12:01:00.000Z",
           }),
@@ -200,7 +201,7 @@ describe("daily dashboard", () => {
     expect(orderedHeadings).toEqual([
       "Needs your attention",
       "Today’s outcomes and progress",
-      "Active Codex chats",
+      "Active and recent Codex chats",
       "Recently completed work",
       "Evening report",
     ]);
@@ -282,5 +283,102 @@ describe("secondary navigation", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "Needs your attention" })).toBeVisible(),
     );
+  });
+
+  it("reloads planning across a timezone date change before the next task write", async () => {
+    const user = userEvent.setup();
+    let scheduleChanged = false;
+    let taskWriteUrl = "";
+    const changedPlanning: PlanningView = {
+      ...planning,
+      localDate: "2026-07-28",
+      timezone: "Pacific/Honolulu",
+      tasks: [],
+      priorDay: { localDate: "2026-07-27", unresolvedTasks: [] },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/health") return Promise.resolve(jsonResponse(health));
+        if (url === "/api/observer") return Promise.resolve(jsonResponse(observer));
+        if (url === "/api/attention") return Promise.resolve(jsonResponse(attention));
+        if (url === "/api/operations/diagnostics") {
+          return Promise.resolve(
+            jsonResponse(
+              { error: { message: "Diagnostics unavailable in this focused test." } },
+              { status: 503 },
+            ),
+          );
+        }
+        if (url === "/api/planning") {
+          return Promise.resolve(jsonResponse(scheduleChanged ? changedPlanning : planning));
+        }
+        if (url === "/api/reports/latest") {
+          return Promise.resolve(
+            jsonResponse({
+              snapshot: null,
+              scheduler: {
+                schedule: {
+                  time: "18:00",
+                  timezone: scheduleChanged ? "Pacific/Honolulu" : "Europe/Berlin",
+                  narrativeEnabled: false,
+                },
+                nextRunAt: "2026-07-29T04:00:00.000Z",
+                lastAutomaticRunAt: null,
+                lastFailure: null,
+              },
+            }),
+          );
+        }
+        if (url === "/api/report-settings" && init?.method === "PUT") {
+          scheduleChanged = true;
+          return Promise.resolve(
+            jsonResponse({
+              schedule: {
+                time: "18:00",
+                timezone: "Pacific/Honolulu",
+                narrativeEnabled: false,
+              },
+              nextRunAt: "2026-07-29T04:00:00.000Z",
+              lastAutomaticRunAt: null,
+              lastFailure: null,
+            }),
+          );
+        }
+        if (url === "/api/report-settings") {
+          return Promise.resolve(
+            jsonResponse({
+              schedule: {
+                time: "18:00",
+                timezone: "Europe/Berlin",
+                narrativeEnabled: false,
+              },
+              nextRunAt: "2026-07-29T16:00:00.000Z",
+              lastAutomaticRunAt: null,
+              lastFailure: null,
+            }),
+          );
+        }
+        if (url === "/api/planning/2026-07-28/tasks") {
+          taskWriteUrl = url;
+          return Promise.resolve(jsonResponse(changedPlanning));
+        }
+        return Promise.resolve(jsonResponse({ error: "Not found" }, { status: 404 }));
+      }),
+    );
+    renderApp("/settings");
+
+    const timezone = await screen.findByLabelText("IANA timezone");
+    await user.clear(timezone);
+    await user.type(timezone, "Pacific/Honolulu");
+    await user.click(screen.getByRole("button", { name: "Save report settings" }));
+    expect(await screen.findByText("Report schedule saved.")).toBeVisible();
+    await user.click(screen.getByRole("link", { name: "Today" }));
+    const outcome = await screen.findByLabelText("Today’s outcome");
+    await user.type(outcome, "Use the reloaded local day");
+    await user.click(screen.getByRole("button", { name: "Add outcome" }));
+
+    expect(taskWriteUrl).toBe("/api/planning/2026-07-28/tasks");
   });
 });

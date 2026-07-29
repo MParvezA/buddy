@@ -53,6 +53,56 @@ describe("local service", () => {
       reviewRequired: false,
       tasks: [],
     });
+    const diagnostics = await app.inject({
+      method: "GET",
+      url: "/api/operations/diagnostics",
+    });
+    expect(
+      diagnostics
+        .json()
+        .retainedCounts.find((item: { category: string }) => item.category === "days")
+        .count,
+    ).toBe(0);
     expect(unsupported.statusCode).toBe(404);
+  });
+
+  it("rejects hostile Host and Origin values at the loopback boundary", async () => {
+    app = await buildApp({ serveStatic: false, databasePath: ":memory:" });
+
+    const hostileHost = await app.inject({
+      method: "GET",
+      url: "/api/operations/export",
+      headers: { host: "attacker.example" },
+    });
+    const hostileOrigin = await app.inject({
+      method: "GET",
+      url: "/api/operations/export",
+      headers: {
+        host: "127.0.0.1:4317",
+        origin: "https://attacker.example",
+      },
+    });
+    const hostileDelete = await app.inject({
+      method: "DELETE",
+      url: "/api/operations/data",
+      headers: {
+        host: "attacker.example",
+        origin: "https://attacker.example",
+      },
+      payload: { confirmation: "DELETE ALL CODEX DAILY DATA" },
+    });
+    const sameOrigin = await app.inject({
+      method: "GET",
+      url: "/api/operations/export",
+      headers: {
+        host: "127.0.0.1:4317",
+        origin: "http://127.0.0.1:4317",
+      },
+    });
+
+    expect(hostileHost.statusCode).toBe(403);
+    expect(hostileOrigin.statusCode).toBe(403);
+    expect(hostileDelete.statusCode).toBe(403);
+    expect(sameOrigin.statusCode).toBe(200);
   });
 });

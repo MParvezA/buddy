@@ -6,7 +6,6 @@ SET timezone = COALESCE(
   'Europe/Berlin'
 )
 WHERE timezone IS NULL;
-
 ALTER TABLE report_snapshots ADD COLUMN timezone TEXT;
 
 UPDATE report_snapshots
@@ -15,4 +14,3 @@ SET timezone = COALESCE(
   'Europe/Berlin'
 )
 WHERE timezone IS NULL;
-

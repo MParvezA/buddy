@@ -32,7 +32,6 @@ test("settings stays keyboard-usable and responsive with privacy-safe diagnostic
     /SECRET RESPONSE|SECRET COMMAND|SECRET QUESTION|SECRET FAILURE|SECRET BLOCKER|rawProtocol|credential/,
   );
 });
-
 test("confirmed day deletion affects local monitor data only", async ({
   page,
 }, testInfo) => {
@@ -54,4 +53,3 @@ test("confirmed day deletion affects local monitor data only", async ({
     /thread\/delete|thread\/archive|turn\/start|SECRET COMMAND/,
   );
 });
-

@@ -35,6 +35,7 @@ from test.test_llama_cpp_provider import (
     test_llama_cpp_config_requires_explicit_resources_and_profile_bounds,
     test_llama_cpp_crash_timeout_and_malformed_output_fail_closed_without_a_plan,
     test_llama_cpp_output_file_is_removed_after_every_terminal_path,
+    test_llama_cpp_terminates_descendant_group_after_leader_exit,
     test_llama_cpp_shutdown_terminates_an_owned_child_process,
     test_llama_cpp_uses_argument_vector_and_extracts_one_framed_json_object,
     test_llama_cpp_reports_recovery_after_a_later_valid_completion,
@@ -108,6 +109,9 @@ def load_tests(loader, tests, pattern):
             unittest.FunctionTestCase(test_llama_cpp_shutdown_terminates_an_owned_child_process),
             unittest.FunctionTestCase(
                 test_llama_cpp_output_file_is_removed_after_every_terminal_path
+            ),
+            unittest.FunctionTestCase(
+                test_llama_cpp_terminates_descendant_group_after_leader_exit
             ),
             unittest.FunctionTestCase(
                 test_llama_cpp_reports_recovery_after_a_later_valid_completion

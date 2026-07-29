@@ -544,6 +544,7 @@ export class ObserverService extends EventEmitter {
     const client = new AppServerClient({
       executable: this.executable,
       args,
+      experimentalApi: true,
       processFactory: this.processFactory,
       requestTimeoutMs: this.requestTimeoutMs,
       setTimer: this.setTimer,

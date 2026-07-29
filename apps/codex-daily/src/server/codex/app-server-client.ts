@@ -14,6 +14,7 @@ export type ProcessFactory = (
 export interface AppServerClientOptions {
   executable: string;
   args: readonly string[];
+  experimentalApi?: boolean;
   processFactory?: ProcessFactory;
   requestTimeoutMs?: number;
   setTimer?: typeof setTimeout;
@@ -95,7 +96,7 @@ export class AppServerClient extends EventEmitter {
         version: "0.1.0",
       },
       capabilities: {
-        experimentalApi: false,
+        experimentalApi: this.options.experimentalApi ?? false,
         requestAttestation: false,
       },
     });

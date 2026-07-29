@@ -2,6 +2,7 @@ import type { SessionBriefContent } from "../../shared/session-briefs.js";
 import { assertSessionBriefContent } from "./session-brief-validator.js";
 
 export function sessionBriefOutputSchema(evidenceLabels: string[]): Record<string, unknown> {
+  // The model schema omits unsupported `uniqueItems`; the validator enforces it.
   const text = (maximum: number) => ({
     type: "string",
     minLength: 1,
@@ -10,7 +11,6 @@ export function sessionBriefOutputSchema(evidenceLabels: string[]): Record<strin
   const list = (maximumItems: number, maximumCharacters: number) => ({
     type: "array",
     maxItems: maximumItems,
-    uniqueItems: true,
     items: text(maximumCharacters),
   });
   return {
@@ -33,7 +33,6 @@ export function sessionBriefOutputSchema(evidenceLabels: string[]): Record<strin
       evidence: {
         type: "array",
         maxItems: 6,
-        uniqueItems: true,
         items: {
           type: "string",
           maxLength: 120,

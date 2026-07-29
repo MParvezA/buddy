@@ -75,6 +75,10 @@ describe("GPT-5.6 session brief gateway", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(requests.find((request) => request.method === "initialize")).toEqual({
+      method: "initialize",
+      experimentalApi: true,
+    });
     const start = requests.find((request) =>
       request.method === "thread/start" &&
       (request.params as Record<string, unknown>).ephemeral === true

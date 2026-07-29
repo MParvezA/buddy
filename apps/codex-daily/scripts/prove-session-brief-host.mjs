@@ -62,6 +62,13 @@ function completionText(envelope, threadId, turnId) {
   return typeof value?.text === "string" ? value.text : null;
 }
 
+function isExpectedCompletion(envelope, threadId, turnId) {
+  if (envelope.method !== "turn/completed") return false;
+  const params = object(envelope.params);
+  const turn = object(params?.turn);
+  return params?.threadId === threadId && turn?.id === turnId;
+}
+
 class HostProofModelContractError extends Error {
   constructor() {
     super("The installed host did not satisfy the session-brief model contract.");
@@ -117,6 +124,7 @@ try {
   client = new AppServerClient({
     executable,
     args: ["app-server", "--stdio"],
+    experimentalApi: true,
     requestTimeoutMs: 120_000,
   });
   client.on("message", (envelope) => {
@@ -163,11 +171,13 @@ try {
   }
 
   const raw = await new Promise((resolve, reject) => {
-    const buffered = completionEnvelopes
-      .map((envelope) => completionText(envelope, thread.id, turn.id))
-      .find((text) => text !== null);
-    if (buffered !== undefined) {
-      resolve(buffered);
+    const buffered = completionEnvelopes.find((envelope) =>
+      isExpectedCompletion(envelope, thread.id, turn.id),
+    );
+    if (buffered) {
+      const text = completionText(buffered, thread.id, turn.id);
+      if (text === null) reject(new HostProofModelContractError());
+      else resolve(text);
       return;
     }
     const timeout = setTimeout(() => {
@@ -175,11 +185,12 @@ try {
       reject(new DOMException("Timed out", "AbortError"));
     }, 120_000);
     const listener = (envelope) => {
-      const text = completionText(envelope, thread.id, turn.id);
-      if (text === null) return;
+      if (!isExpectedCompletion(envelope, thread.id, turn.id)) return;
       clearTimeout(timeout);
       client.off("message", listener);
-      resolve(text);
+      const text = completionText(envelope, thread.id, turn.id);
+      if (text === null) reject(new HostProofModelContractError());
+      else resolve(text);
     };
     client.on("message", listener);
   });

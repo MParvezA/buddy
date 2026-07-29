@@ -56,6 +56,12 @@ def send(value):
 def safe_request_record(message):
     method = message.get("method")
     params = message.get("params", {})
+    if method == "initialize":
+        capabilities = params.get("capabilities", {})
+        return {
+            "method": method,
+            "experimentalApi": capabilities.get("experimentalApi") is True,
+        }
     if method == "thread/read":
         return {
             "method": method,
@@ -229,7 +235,12 @@ for line in sys.stdin:
     if method_log and method:
         with open(method_log, "a", encoding="utf-8") as handle:
             handle.write(method + "\n")
-    if request_log and method in {"thread/read", "thread/start", "turn/start"}:
+    if request_log and method in {
+        "initialize",
+        "thread/read",
+        "thread/start",
+        "turn/start",
+    }:
         with open(request_log, "a", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(safe_request_record(message), separators=(",", ":")) + "\n"

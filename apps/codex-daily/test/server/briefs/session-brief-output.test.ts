@@ -16,7 +16,8 @@ const valid = {
 
 describe("session brief structured output", () => {
   it("builds a strict evidence-specific six-field schema", () => {
-    expect(sessionBriefOutputSchema(["user:first-intent"])).toMatchObject({
+    const schema = sessionBriefOutputSchema(["user:first-intent"]);
+    expect(schema).toMatchObject({
       type: "object",
       additionalProperties: false,
       required: [
@@ -30,11 +31,11 @@ describe("session brief structured output", () => {
       properties: {
         evidence: {
           maxItems: 6,
-          uniqueItems: true,
           items: { enum: ["user:first-intent"] },
         },
       },
     });
+    expect(JSON.stringify(schema)).not.toContain('"uniqueItems"');
   });
 
   it("parses raw JSON and applies the input evidence allowlist", () => {

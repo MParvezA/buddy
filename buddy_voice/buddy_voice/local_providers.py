@@ -420,14 +420,36 @@ def _pcm_wav_properties(
 
 
 def _validate_capture_wav(path: Path) -> float:
-    """Require PipeWire microphone capture to be 16-bit PCM, 16 kHz, mono."""
+    """Require a correctly formatted capture containing an actual audio signal."""
     try:
-        frames, rate, channels, sample_width, _compression = _pcm_wav_properties(
-            path, MAX_CAPTURE_WAV_BYTES, 'PipeWire capture WAV')
+        with _open_bounded_regular_file(
+                path, MAX_CAPTURE_WAV_BYTES, 'PipeWire capture WAV') as source:
+            with wave.open(source, 'rb') as reader:
+                frames = reader.getnframes()
+                rate = reader.getframerate()
+                channels = reader.getnchannels()
+                sample_width = reader.getsampwidth()
+                compression = reader.getcomptype()
+                if compression != 'NONE' or min(frames, rate, channels, sample_width) <= 0:
+                    raise ValueError(
+                        'must be a non-empty PCM WAV with positive audio properties')
+                if (sample_width, rate, channels) != (2, 16000, 1):
+                    raise CaptureError(
+                        'PipeWire capture must be 16-bit PCM WAV at 16 kHz mono')
+                has_signal = any(
+                    any(chunk)
+                    for chunk in iter(lambda: reader.readframes(4096), b'')
+                )
+    except CaptureError:
+        raise
+    except (EOFError, wave.Error, OSError) as error:
+        raise CaptureError(f'PipeWire capture not a readable WAV: {error}') from error
     except ValueError as error:
         raise CaptureError(f'PipeWire capture {error}') from error
-    if (sample_width, rate, channels) != (2, 16000, 1):
-        raise CaptureError('PipeWire capture must be 16-bit PCM WAV at 16 kHz mono')
+    if not has_signal:
+        raise CaptureError(
+            'PipeWire capture contains no audio signal; select and unmute a microphone '
+            'source (the WH-CH520 requires a headset/HFP profile, not A2DP)')
     return frames / rate
 
 

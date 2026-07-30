@@ -100,7 +100,7 @@ def stop(*_):
     open(path + '.signals', 'w').write(' '.join(signals))
     with wave.open(path, 'wb') as output:
         output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
-        output.writeframes(b'\\0\\0' * 160)
+        output.writeframes(b'\\1\\0' * 160)
     raise SystemExit(0)
 signal.signal(signal.SIGINT, lambda *_: signals.append('INT'))
 signal.signal(signal.SIGTERM, stop)
@@ -126,6 +126,43 @@ while True: time.sleep(0.01)
     assert Path(str(capture.audio_path) + '.signals').read_text() == 'INT TERM'
 
 
+def test_pipewire_capture_rejects_all_zero_audio_with_device_guidance(
+        tmp_path: Path) -> None:
+    """A valid WAV with no microphone signal fails before invoking Whisper."""
+    recorder = _script(tmp_path / 'pw-record', """
+import signal, sys, time, wave
+path = sys.argv[-1]
+def stop(*_):
+    with wave.open(path, 'wb') as output:
+        output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
+        output.writeframes(b'\\0\\0' * 1600)
+    raise SystemExit(0)
+signal.signal(signal.SIGINT, stop)
+while True: time.sleep(0.01)
+""")
+    source = PipeWirePushToTalkAudioInput(
+        record_binary=recorder, maximum_capture_seconds=1, temp_directory=tmp_path)
+    released = Event()
+    failure = []
+
+    def capture() -> None:
+        try:
+            source.capture_once(released)
+        except Exception as error:
+            failure.append(error)
+
+    worker = Thread(target=capture)
+    worker.start()
+    time.sleep(0.05)
+    released.set()
+    worker.join()
+
+    assert failure
+    assert 'no audio signal' in str(failure[0])
+    assert 'microphone source' in str(failure[0])
+    assert not list(tmp_path.glob('buddy-capture-*'))
+
+
 def test_capture_uses_private_directory_and_does_not_touch_preexisting_output(
         tmp_path: Path) -> None:
     """A preexisting output-looking symlink is never selected for PipeWire capture."""
@@ -137,7 +174,7 @@ path = sys.argv[-1]
 def stop(*_):
     with wave.open(path, 'wb') as output:
         output.setnchannels(1); output.setsampwidth(2); output.setframerate(16000)
-        output.writeframes(b'\\0\\0' * 16)
+        output.writeframes(b'\\1\\0' * 16)
     raise SystemExit(0)
 signal.signal(signal.SIGINT, stop)
 while True: time.sleep(0.01)

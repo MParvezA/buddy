@@ -90,3 +90,32 @@ def test_clarification_cancellation_and_action_result_response():
     assert "will not execute" in core.receive_final_utterance("no")[0].text
     assert core.handle_execution_result("succeeded", "Arrived in the kitchen.")[0].text == "Arrived in the kitchen."
     assert core.handle_execution_result("failed", "Navigation failed.")[0].text == "Navigation failed."
+
+
+def test_capability_question_replaces_pending_plan_without_executing_it():
+    """A new information request must not confirm a stale movement proposal."""
+    provider = DeterministicFakeProvider([_valid_plan()])
+    core = DialogueCore(provider)
+    core.update_capabilities(_capabilities())
+
+    proposal = core.receive_final_utterance("go to the kitchen")
+    assert "Would you like me to proceed?" in proposal[0].text
+
+    answer = core.receive_final_utterance("Buddy, what can you do?")
+    assert len(answer) == 1
+    assert answer[0].kind == "speak"
+    assert "navigate" in answer[0].text.casefold()
+    assert "status" in answer[0].text.casefold()
+    assert len(provider.contexts) == 1
+
+    following_yes = core.receive_final_utterance("yes")
+    assert all(effect.kind != "execute" for effect in following_yes)
+
+    german_provider = DeterministicFakeProvider([_valid_plan()])
+    german_core = DialogueCore(german_provider)
+    german_core.update_capabilities(_capabilities())
+    german_answer = german_core.receive_final_utterance(
+        "Buddy, welche Fähigkeiten hast du?"
+    )
+    assert german_answer[0].kind == "speak"
+    assert not german_provider.contexts

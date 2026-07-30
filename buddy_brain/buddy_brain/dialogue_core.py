@@ -13,6 +13,23 @@ from buddy_brain.model_provider import LocalModelProvider, ModelProviderError
 
 
 ARGUMENT_TYPES = {"string", "integer", "float", "boolean"}
+CAPABILITY_QUESTIONS = {
+    "what can you do",
+    "what are your capabilities",
+    "what capabilities do you have",
+    "what tasks can you perform",
+    "was kannst du",
+    "was kannst du tun",
+    "was kannst du machen",
+    "welche fähigkeiten hast du",
+    "was sind deine fähigkeiten",
+}
+CAPABILITY_DESCRIPTIONS = {
+    "stop": "stop or cancel motion",
+    "speak": "speak responses",
+    "navigate_to": "navigate to configured named locations",
+    "report_status": "report my current status",
+}
 
 
 class ValidationError(ValueError):
@@ -87,6 +104,37 @@ class DialogueEffect:
     text: str = ""
     plan: ValidatedPlan | None = None
     provider_error: str = ""
+
+
+def _normalized_utterance(text: str) -> str:
+    """Normalize a short spoken intent without fuzzy or model-based matching."""
+    normalized = " ".join(
+        text.casefold().translate(str.maketrans("", "", ".,!?;:")).split()
+    )
+    if normalized == "buddy":
+        return ""
+    if normalized.startswith("buddy "):
+        return normalized[6:]
+    return normalized
+
+
+def _is_capability_question(text: str) -> bool:
+    return _normalized_utterance(text) in CAPABILITY_QUESTIONS
+
+
+def _capability_answer(capabilities: dict[str, CapabilitySchema]) -> str:
+    descriptions = [
+        CAPABILITY_DESCRIPTIONS.get(name, name.replace("_", " "))
+        for name, schema in sorted(capabilities.items())
+        if schema.available
+    ]
+    if not descriptions:
+        return "I do not currently have any available robot capabilities."
+    if len(descriptions) == 1:
+        available = descriptions[0]
+    else:
+        available = ", ".join(descriptions[:-1]) + f", and {descriptions[-1]}"
+    return f"I can {available}."
 
 
 class ContextBuilder:
@@ -250,6 +298,13 @@ class DialogueCore:
         utterance = text.strip()
         if not utterance:
             return []
+        if _is_capability_question(utterance):
+            # A deterministic information request supersedes any older proposal.
+            # It must never be interpreted as confirmation or become a robot task.
+            self._pending = None
+            return [
+                DialogueEffect("speak", _capability_answer(self._capabilities))
+            ]
         if self._pending is not None:
             answer = utterance.casefold().strip(".!,?")
             if answer in {"yes", "confirm", "proceed"}:
